@@ -23,14 +23,11 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 
 ## What the code shows
 
-* `g_m^lin` and `c_n` seem to run **parallel** 
-* The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
-  1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat
-  regime). This is the theorem; the KPUU `√n` is never needed. Ratios are quoted against `c_n⁺`;
-  the certified/exchanged `c_n⁺` is tighter than the old estimate, so they read slightly *higher*
-  than before — closer to the true `g_m/c_n`.
-* In `legendre.py`, `√n·c_n` sits a full half-power above `g_m^lin` (the closed gap); in
-  `matern.py` the same point is made dimension-robustly by the flat ratio.
+The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
+1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat
+regime). This is the theorem; the KPUU `√n` is never needed. Ratios are quoted against `c_n⁺`;
+the certified/exchanged `c_n⁺` is tighter than the old estimate, so they read slightly *higher*
+than before — closer to the true `g_m/c_n`.
 
 ## Files
 
@@ -42,7 +39,7 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 | `legendre.py`        | Legendre example → `legendre.png`; the P-greedy design → `legendre_points.png` |
 | `matern.py`          | Matérn `ν=3/2` in `d=1,3`, bounded-ratio check → `matern.png`; the P-greedy design → `matern_points.png` |
 | `periodic_mixed.py`  | periodic mixed-Sobolev `H^m_mix([0,1]^d)`, `d=2,3`, `m=1,2,3` → `periodic_mixed.png`, `periodic_mixed_points.png` |
-| `paley_wiener.py`    | band-limited Paley–Wiener/prolate kernel: flat-then-cliff `g_m^lin` and `c_n` at `N_eff=2c/π` (float64; the retired mpmath past-the-cliff run lives in `archive/high_precision_paley_wiener/`) → `paley_wiener.png`; the P-greedy design → `paley_wiener_points.png` |
+| `paley_wiener.py`    | band-limited Paley–Wiener/prolate kernel: flat-then-cliff `g_m^lin` and `c_n` at `N_eff=2c/π` → `paley_wiener.png`,  `paley_wiener_points.png` |
 
 ## Usage
 
@@ -94,13 +91,6 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
 * **P-greedy engine** matches the standard VKOGA implementation to `~1e-8`; it uses the
   efficient incremental power update (`O(N·m²)` total, cached kernel columns), is
   device-agnostic (a CUDA grid runs on GPU), and dtype-threaded.
-* **Periodic mixed-Sobolev test** (`periodic_mixed.py`) probes the *mixed-smoothness* regime: the
-  RKHS `H^m_mix([0,1]^d)`, reproducing kernel the `d`-fold tensor of
-  `k_1(s,t)=1+(-1)^{m-1}/(2m)!·B_{2m}(|s-t|)` (Bernoulli polynomial; Berlinet–Thomas-Agnan p.318),
-  `d=2,3`, `m=1,2,3`. It confirms the **bounded ratio** there too, with the literature rate
-  `c_n ∼ n^{-(m-1/2)}(log n)^{(d-1)m}` overlaid as an *asymptotic guide* (constant fitted to `c_n`
-  on the post-hump tail). The log factor is far from developed at reachable `n` — which is why the
-  direct `g_n/c_n` ratio, not the rate line, is the trustworthy comparison in higher `d`.
 
 ## Caveats
 
