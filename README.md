@@ -2,13 +2,11 @@
 
 Numerical assessment of the comparison theorems in **`MAIN_Sampl_vs_Gelfand.tex`**
 (Neumayer–Pozharska–Ullrich, *sampling numbers versus Gelfand widths for optimal
-recovery in the uniform norm*), on univariate kernel RKHS examples — the Legendre
-example being Section 7.3 of Pozharska & Ullrich,
-[arXiv:2103.11124](https://arxiv.org/abs/2103.11124).
+recovery in the uniform norm*).
 
 ## The question
 
-For the unit ball of a bounded-kernel RKHS `H(K)` on `D=[-1,1]`, recovered in the
+For the unit ball of a bounded-kernel RKHS `H(K)` on `D=[-1,1]^d`, recovered in the
 **uniform norm**, the paper compares two quantities as functions of the budget:
 
 * **`g_m^lin`** — the *linear sampling numbers* `= inf_{|P|=m} ‖Pow_P‖_∞`, the best
@@ -25,10 +23,8 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 
 ## What the code shows
 
-* `g_m^lin` and `c_n` run **parallel** on the rate `n^{-(s-1/2)}` (the sup-norm
-  Gelfand/sampling rate — *not* `n^{-(s-1)}`, which is the loose top-`n` Mercer bound
-  `≈ √n·c_n`).
-* The **ratio `g_m/c_n` is bounded** (≈ 1.0–2.4, no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
+* `g_m^lin` and `c_n` seem to run **parallel** 
+* The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
   1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat
   regime). This is the theorem; the KPUU `√n` is never needed. Ratios are quoted against `c_n⁺`;
   the certified/exchanged `c_n⁺` is tighter than the old estimate, so they read slightly *higher*
@@ -47,7 +43,6 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 | `matern.py`          | Matérn `ν=3/2` in `d=1,3`, bounded-ratio check → `matern.png`; the P-greedy design → `matern_points.png` |
 | `periodic_mixed.py`  | periodic mixed-Sobolev `H^m_mix([0,1]^d)`, `d=2,3`, `m=1,2,3` → `periodic_mixed.png`, `periodic_mixed_points.png` |
 | `paley_wiener.py`    | band-limited Paley–Wiener/prolate kernel: flat-then-cliff `g_m^lin` and `c_n` at `N_eff=2c/π` (float64; the retired mpmath past-the-cliff run lives in `archive/high_precision_paley_wiener/`) → `paley_wiener.png`; the P-greedy design → `paley_wiener_points.png` |
-| `MAIN_Sampl_vs_Gelfand.tex` | the paper under test                                           |
 
 ## Usage
 
@@ -67,8 +62,7 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
   Chebyshev grid encodes the *arcsine/equilibrium* measure — right only for a **boundary-concentrated
   Mercer** kernel (Legendre, `grid_kind="chebyshev"`). A **stationary** kernel (Matérn, sinc,
   periodic) has no endpoint preference, so its measure is **uniform** (scrambled Sobol,
-  `grid_kind="uniform"`, any `d`). This matters: on sinc the uniform grid lifts `c_n⁻` ~15% over
-  Chebyshev; the Matérn-1D median ratio moves 2.27→2.05. Legendre and `d>1` are unaffected.
+  `grid_kind="uniform"`, any `d`).
 * **`g_m^lin`** = the running `sup_x Pow_m(x)` of the P-greedy design (the strong argmax trivially
   meets the `γ=1/2` weak rule). Its plateau-then-drop staircase for Matérn is the signature of a
   *stationary* kernel (dyadic gap-bisection, quasi-uniform centers), versus the smooth power law of
@@ -78,28 +72,20 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
 * **`c_n`** = the Kolmogorov width of the translate set by a **reweighted-SVD (IRLS) minimax with
   a Remez exchange step**: kernel-PCA on the reweighted Gram, shift weight to the worst point. The
   linear reweight `w ← w·(r² + floor·r²_max)` is the only rule, with `floor=1` as a **damping
-  constant** — the smooth step keeps the best-iterate subspace stable off-grid, where the aggressive
-  `floor=1e-3` oscillates (Matérn 1D ratios 1.19–1.28 vs 1.04–1.08; Legendre 1.29 vs 1.06 at `n=200`).
+  constant** — the smooth step keeps the best-iterate subspace stable off-grid.
   Returned as a **bracket `[c_n⁻, c_n⁺]`**:
     * `c_n⁻` (lower) — **rigorous** (weighted-average residual `= Σ_{k>n} λ_k(C_p)`, weak duality),
       so `c_n⁻ ≤ c_n` always (up to the `r_n = 3n+100` truncation, `≤ 1e-4` relative).
     * `c_n⁺` (upper) — on a **1D grid with a `dist_bound` modulus** (Matérn, sinc, periodic) a
       **branch-and-bound certificate**: each cell bounded by `r(center) + dist_bound(halfwidth)`,
-      bisect what exceeds the incumbent, prune the rest — rigorous at every stage, within
-      `certify_tol` (2%) when converged, and cheaper than the L-BFGS multistart it replaces (which
-      it caught undershooting a true sup by 10%). Where no modulus exists — **Legendre** (endpoint
+      bisect what exceeds the incumbent, prune the rest. Where no modulus exists — **Legendre** (endpoint
       modulus diverges) and **`d>1`** (cells explode) — `c_n⁺` is a **numerical estimate**: L-BFGS-B
       multistart from two polished seed sets + a disagreement **self-check**, plus the **endpoint
       sweep** (1D Mercer) for the boundary spike.
     * **exchange** (stationary default): the off-grid residual peaks rejoin the dual set, the basis
       is extended *exactly* by their translates (Nyström update, no re-eigendecomposition), a short
-      warm IRLS re-optimizes; `max` of lowers / `min` of uppers is kept. Attacks the dominant gap —
-      a grid-optimal subspace bad off-grid: Matérn `ν=3/2` (1D, `N=1000`) `n=200=N/5` ratio
-      **1.69 → ~1.05** at ~1.7× cost, beating doubling the iterations (1.20) or grid (1.63); `d=3`
-      **1.83 → 1.56**. For **Legendre** exchange is auto-off (the spike re-emerges at a new offset);
-      instead the `c_n` grid gets a **geometric endpoint ladder** (`box_grid(edge_ladder=120)`): the
-      spike lives within `~1/N²` of `±1`, inside the innermost Chebyshev node, so the ladder lets the
-      dual reach it — `n=200` ratio **2.10 → 1.06** at unchanged cost.
+      warm IRLS re-optimizes; `max` of lowers / `min` of uppers is kept. For **Legendre** exchange is auto-off (the spike re-emerges at a new offset);
+      instead the `c_n` grid gets a **geometric endpoint ladder** (`box_grid(edge_ladder=120)`).
     * monotone envelopes: `c_n⁺ ← min_{k≤n} c_k⁺` (**subspace nesting**; certified entries stay
       certificates) and `c_n⁻ ← max_{m≥n} c_m⁻`.
   Kernel-agnostic (needs `kernel.eval`; `dist_bound` → certificate, `feature_map` → Mercer speed,
@@ -143,5 +129,3 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
     information anyway).
   `refine=False` reverts to the grid-max upper bound (no certificate/exchange; under-resolves at
   large `n`).
-* Absolute constants in `K_s` (the `1+` regularization, Legendre normalization) match
-  arXiv:2103.11124 §7.3; the conclusions here concern **rates and the bounded ratio**.
