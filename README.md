@@ -24,10 +24,7 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 ## What the code shows
 
 The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
-1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat
-regime). This is the theorem; the KPUU `√n` is never needed. Ratios are quoted against `c_n⁺`;
-the certified/exchanged `c_n⁺` is tighter than the old estimate, so they read slightly *higher*
-than before — closer to the true `g_m/c_n`.
+1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat regime). Ratios are quoted against `c_n⁺`.
 
 ## Files
 
@@ -38,7 +35,7 @@ than before — closer to the true `g_m/c_n`.
 | `widths.py`          | `g_m^lin` (P-greedy sup power), `c_n` (numerical Kolmogorov width: IRLS minimax + exchange + certified/estimated sup), driver |
 | `legendre.py`        | Legendre example → `legendre.png`; the P-greedy design → `legendre_points.png` |
 | `matern.py`          | Matérn `ν=3/2` in `d=1,3`, bounded-ratio check → `matern.png`; the P-greedy design → `matern_points.png` |
-| `periodic_mixed.py`  | periodic mixed-Sobolev `H^m_mix([0,1]^d)`, `d=2,3`, `m=1,2,3` → `periodic_mixed.png`, `periodic_mixed_points.png` |
+| `periodic_mixed.py`  | periodic mixed-Sobolev `H^m_mix([0,1]^d)`, `d=2,3`, `m=1,2,3` → `periodic_mixed.png`; the P-greedy design → `periodic_mixed_points.png` |
 | `paley_wiener.py`    | band-limited Paley–Wiener/prolate kernel: flat-then-cliff `g_m^lin` and `c_n` at `N_eff=2c/π` → `paley_wiener.png`,  `paley_wiener_points.png` |
 
 ## Usage
@@ -64,15 +61,14 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
   meets the `γ=1/2` weak rule). Its plateau-then-drop staircase for Matérn is the signature of a
   *stationary* kernel (dyadic gap-bisection, quasi-uniform centers), versus the smooth power law of
   the endpoint-clustered Legendre design. Each driver's `points_figure()` (via `greedy.design_figure`)
-  plots the chosen point as the argmax of the power function and the resulting design (position vs.
+  plots the resulting design (position vs.
   selection order) — endpoint-clustered for Legendre, quasi-uniform for Matérn.
 * **`c_n`** = the Kolmogorov width of the translate set by a **reweighted-SVD (IRLS) minimax with
-  a Remez exchange step**: kernel-PCA on the reweighted Gram, shift weight to the worst point. The
-  linear reweight `w ← w·(r² + floor·r²_max)` is the only rule, with `floor=1` as a **damping
-  constant** — the smooth step keeps the best-iterate subspace stable off-grid.
+  a Remez exchange step**: kernel-PCA on the reweighted Gram. The competing
+  linear reweight `w ← w·(r² + floor·r²_max)`  with `floor=1` shifts mass towards the worst point.
   Returned as a **bracket `[c_n⁻, c_n⁺]`**:
     * `c_n⁻` (lower) — **rigorous** (weighted-average residual `= Σ_{k>n} λ_k(C_p)`, weak duality),
-      so `c_n⁻ ≤ c_n` always (up to the `r_n = 3n+100` truncation, `≤ 1e-4` relative).
+      so `c_n⁻ ≤ c_n`.
     * `c_n⁺` (upper) — on a **1D grid with a `dist_bound` modulus** (Matérn, sinc, periodic) a
       **branch-and-bound certificate**: each cell bounded by `r(center) + dist_bound(halfwidth)`,
       bisect what exceeds the incumbent, prune the rest. Where no modulus exists — **Legendre** (endpoint
@@ -86,8 +82,7 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
     * monotone envelopes: `c_n⁺ ← min_{k≤n} c_k⁺` (**subspace nesting**; certified entries stay
       certificates) and `c_n⁻ ← max_{m≥n} c_m⁻`.
   Kernel-agnostic (needs `kernel.eval`; `dist_bound` → certificate, `feature_map` → Mercer speed,
-  `eval_grad` → multistart gradients). Stable up to the Gram's numerical rank; algebraic
-  Legendre/Matérn reach hundreds.
+  `eval_grad` → multistart gradients).
 * **P-greedy engine** matches the standard VKOGA implementation to `~1e-8`; it uses the
   efficient incremental power update (`O(N·m²)` total, cached kernel columns), is
   device-agnostic (a CUDA grid runs on GPU), and dtype-threaded.
