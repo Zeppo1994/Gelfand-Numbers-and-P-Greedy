@@ -64,7 +64,7 @@ def greedy_curve(m: int, d: int, n_nodes: int, sel_grid: int):
 
 
 def bench_rate(n, m, d):
-    """The Gelfand-width benchmark rate  n^{-(m-1/2)} (log n)^{(d-1)m}  (the user's)."""
+    """The Gelfand-width benchmark rate  n^{-(m-1/2)} (log n)^{(d-1)m}  for H^m_mix."""
     n = np.asarray(n, float)
     return n ** (-(m - 0.5)) * np.log(n) ** ((d - 1) * m)
 
@@ -146,6 +146,21 @@ def rates_figure():
             )
             n_line = np.geomspace(max(n_start, 2.0), gn[-1], 60)
 
+            # exact c_n by the orbit formula (see gelfand_tails) -- a proof-grade reference
+            # the numerical bracket must contain.
+            ex = np.sqrt(
+                np.clip(
+                    PeriodicSobolevMixedKernel(m=m, d=d).gelfand_tails(int(ns_c[-1])),
+                    0.0,
+                    None,
+                )
+            )
+            print(
+                f"      exact orbit c_n check: max |c_n^-/exact - 1| = "
+                f"{np.abs(cn_lo / ex[ns_c] - 1).max():.1e}, "
+                f"max c_n^+/exact = {np.max(cn_up / ex[ns_c]):.3f}"
+            )
+
             # --- top: g_n, numerical c_n bracket (band + edges), asymptotic guide ---
             top.loglog(
                 gn[2:],
@@ -154,6 +169,15 @@ def rates_figure():
                 color=col,
                 lw=1.6,
                 label=rf"$g_n^{{\mathrm{{lin}}}}$ (sampling), $m={m}$",
+            )
+            top.loglog(
+                np.arange(1, len(ex)),
+                ex[1:],
+                "--",
+                color="k",
+                lw=0.9,
+                alpha=0.55,
+                label="exact $c_n$ (orbit formula)" if m == min(m_nodes) else None,
             )
             top.fill_between(
                 ns_c,

@@ -7,8 +7,8 @@ notation of MAIN_Sampl_vs_Gelfand.tex.
   * c_n = d_n(K)_H = inf_{dim V=n} sup_x dist(a_x, V) -- GELFAND WIDTHS, the Kolmogorov width of
     the translates {K(.,x)} by a reweighted-SVD (IRLS) minimax with a Remez EXCHANGE step,
     returned as a bracket [lower, upper]: lower rigorous (weak duality), upper a branch-and-bound
-    CERTIFICATE where the kernel gives a dist_bound modulus (1D stationary) and an off-grid sup
-    estimate otherwise (Legendre endpoints, d>1) -- see gelfand_widths.  NOT the top-n Mercer
+    CERTIFICATE where the kernel gives a rigorous modulus (dist_bound, 1D; dist_bound_cell, d>1)
+    and an off-grid sup estimate otherwise (Legendre endpoints) -- see gelfand_widths.  NOT the top-n Mercer
     eigenspace, which overshoots by ~sqrt(n).
 (sigma_n = sqrt(mu_n), exact for a Mercer kernel, are read off kernel.sqrt_mu in legendre.py.)
 
@@ -22,6 +22,7 @@ truncates the widths).
 """
 
 from __future__ import annotations
+import functools
 import warnings
 import numpy as np
 import torch
@@ -189,47 +190,52 @@ def _refine_sup(
 
 def _bnb_sup(
     res2,
-    dist_bound,
+    cell_mod,
     n: int,
+    d: int,
     dt,
     domain=(-1.0, 1.0),
-    tol: float = 0.02,
+    tol: float = 0.005,
     max_evals: int = 400_000,
     chunk: int = 8192,
 ):
-    """CERTIFIED sup_x res2(x) on the 1D box by branch-and-bound, res2 = dist_H(a_x, V_p)^2.  On a
-    cell of halfwidth h at center c,  sup r <= r(c) + dist_bound(h)  (r = sqrt(res2)), since
-    |r(x)-r(y)| <= ||a_x-a_y||_H <= dist_bound(|x-y|) -- the kernel's rigorous modulus.  Cells whose
-    bound exceeds best*(1+tol) are bisected, the rest pruned; the max active-leaf bound is a TRUE
-    upper bound at every stage (no seed luck -- this has caught the L-BFGS multistart undershooting
-    a true sup by 10%), and cheaper, refining only near the ~n peaks.
+    """CERTIFIED sup_x res2(x) on the box by branch-and-bound over hyperrectangle cells,
+    res2 = dist_H(a_x, V_p)^2.  On a cell with center c and per-coordinate halfwidths H,
+    sup r <= r(c) + cell_mod(H)  (r = sqrt(res2)), since |r(x)-r(y)| <= ||a_x-a_y||_H and
+    cell_mod is the kernel's rigorous modulus over the cell (1D: dist_bound at the halfwidth;
+    d>1: e.g. Matern's dist_bound at the half-diagonal).  Cells whose bound exceeds
+    best*(1+tol) are bisected along their longest axis, the rest pruned; the max active-leaf
+    bound is a TRUE upper bound at every stage (no seed luck -- this has caught the L-BFGS
+    multistart undershooting true sups by 4-10%), refining only near the peaks.  Feasible
+    whenever the residual peaks are pointlike; NOT for near-flat residual fields (periodic
+    d>1, whose orbit symmetry flattens res2 -- its exact gelfand_tails covers that case).
 
-    Returns (cert, seen, pts, vals, converged): cert >= sup res2 (rigorous always, loose if the
-    budget ran out), seen = largest evaluated res2 (<= sup, doubles as the estimate), (pts, vals) =
-    peak seeds for the exchange -- the level-0 scan's local maxima (~one per peak; deeper levels
-    cluster on the global peak alone) plus all deeper evals -- and converged = cert within ~3*tol of
-    seen.  It can't converge where the widths hit the float64 noise floor (band-limited kernel past
-    its cliff, r ~ 1e-7); the caller then falls back to `seen`."""
+    Returns (cert, seen, pts, vals, converged): cert >= sup res2 (rigorous always, loose if
+    the budget ran out), seen = largest evaluated res2 (<= sup, doubles as the estimate),
+    (pts, vals) = every evaluated center (peak seeds for the exchange), converged = cert
+    within ~3*tol of seen.  It can't converge where the widths hit the float64 noise floor
+    (band-limited kernel past its cliff); the caller then falls back to `seen`."""
     lo, hi = domain
 
-    def rvals(c):  # r = sqrt(res2) at the cell centers, chunked
-        out = torch.empty(c.shape[0], dtype=dt)
-        for s in range(0, c.shape[0], chunk):
+    def rvals(C):  # r = sqrt(res2) at the cell centers, chunked
+        out = torch.empty(C.shape[0], dtype=dt)
+        for s in range(0, C.shape[0], chunk):
             with torch.no_grad():
-                out[s : s + chunk] = res2(c[s : s + chunk].reshape(-1, 1))
+                out[s : s + chunk] = res2(C[s : s + chunk])
         return torch.sqrt(torch.clamp(out, min=0.0))
 
-    M0 = min(max(8 * n, 256), max_evals)
-    edges = torch.linspace(lo, hi, M0 + 1, dtype=dt)
-    c = 0.5 * (edges[:-1] + edges[1:])
-    h = torch.full((M0,), (hi - lo) / (2 * M0), dtype=dt)
-    r = rvals(c)
-    all_c, all_r = [c], [r]
-    n_evals = M0
+    m0 = max(4, int(np.ceil(min(max(8 * n, 256), max_evals) ** (1.0 / d))))  # per axis
+    edges = torch.linspace(lo, hi, m0 + 1, dtype=dt)
+    c1 = 0.5 * (edges[:-1] + edges[1:])
+    C = torch.cartesian_prod(*([c1] * d)).reshape(-1, d)
+    H = torch.full_like(C, (hi - lo) / (2 * m0))
+    r = rvals(C)
+    n_evals = C.shape[0]
+    all_c, all_r = [C], [r]
     best = float(r.max())
-    cert = float((r + dist_bound(h)).max())
+    cert = float((r + cell_mod(H)).max())
     while True:
-        bound = r + dist_bound(h)
+        bound = r + cell_mod(H)
         keep = bound > best * (1.0 + tol)
         if not bool(keep.any()):
             cert = best * (1.0 + tol)  # every leaf bound <= threshold: converged
@@ -237,31 +243,32 @@ def _bnb_sup(
         cert = float(
             bound[keep].max()
         )  # rigorous if we stop here (max over active leaves)
-        if n_evals + 2 * int(keep.sum()) > max_evals:
+        k = int(keep.sum())
+        if n_evals + 2 * k > max_evals:
             break  # budget exhausted: cert stays rigorous, just loose (converged=False)
-        hn = h[keep] / 2
-        c = torch.cat([c[keep] - hn, c[keep] + hn])
-        h = torch.cat([hn, hn])
-        r = rvals(c)
-        n_evals += c.shape[0]
+        Ck, Hk = C[keep], H[keep]
+        ar = torch.arange(k)
+        ax = torch.argmax(Hk, dim=1)  # bisect the longest axis of each cell
+        off = torch.zeros_like(Ck)
+        off[ar, ax] = Hk[ar, ax] / 2
+        Hk[ar, ax] /= 2  # advanced indexing above copied, so in-place is safe
+        C = torch.cat([Ck - off, Ck + off])
+        H = torch.cat([Hk, Hk])
+        r = rvals(C)
+        n_evals += C.shape[0]
         best = max(best, float(r.max()))
-        all_c.append(c)
+        all_c.append(C)
         all_r.append(r)
-    r0 = all_r[
-        0
-    ]  # peak seeds: level-0 local maxima (~one per peak) + deeper evaluations
-    im = torch.zeros(M0, dtype=torch.bool)
-    im[1:-1] = (r0[1:-1] >= r0[:-2]) & (r0[1:-1] >= r0[2:])
-    im[0], im[-1] = r0[0] >= r0[1], r0[-1] >= r0[-2]
-    pts = torch.cat([all_c[0][im]] + all_c[1:]).reshape(-1, 1)
-    vals = torch.cat([all_r[0][im]] + all_r[1:]) ** 2
+    pts = torch.cat(all_c)
+    vals = torch.cat(all_r) ** 2
     return cert**2, best**2, pts, vals, cert <= (1.0 + 3.0 * tol) * max(best, 1e-300)
 
 
 def _pick_peaks(pts, vals, n_keep: int, min_sep: float, extra=None):
     """Dedup peak candidates to <= n_keep exchange points: greedy in descending res2 under a
     pairwise min separation (the multistart / B&B pile many evals on one peak).  `extra` rows
-    (e.g. the endpoint-sweep argmax) are appended unconditionally.  pts (M, d), vals (M,)."""
+    (e.g. the endpoint-sweep argmax) are appended unconditionally.  pts (M, d), vals (M,).
+    """
     order = torch.argsort(vals, descending=True)
     if order.shape[0] > 40 * n_keep:  # pre-thin: the tail can't win a slot
         order = order[: 40 * n_keep]
@@ -277,24 +284,26 @@ def _pick_peaks(pts, vals, n_keep: int, min_sep: float, extra=None):
     return torch.stack(chosen) if chosen else pts[:0]
 
 
-def _extend_system(kernel, Xg, lam, U, Phi_r, nrm2, Xp):
-    """EXACT rank-k extension of the truncated working system by k peak points Xp -- a Nystrom
-    basis update, no re-eigendecomposition, O(N r_n k).  The span grows from W = top r_n grid modes
-    to W' = W + span{(I-Pi_W) a_p}, in which the peak translates lie EXACTLY, so stage 2 can kill
-    their residuals.  With C = Pi_W-coords of a_p, S = K(Xp,Xp) - C C^T the residual Gram (out-of-span
-    + below-r_n in-span mass), R = sqrtm(S), Rp = its pseudo-inverse:
-        Phi2   = [[Phi_r, Z], [C, R]],  Z = (K(Xg,Xp) - Phi_r C^T) Rp -- exact coords of all N+k
-                 translates in the extended basis (row norms <= true, so stage 2's lower bound keeps
-                 stage 1's truncation semantics);
-        nrm2_2 = true squared norms; C, Rp, isq collapse the stage-2 subspace into an (n, N+k) map."""
-    dt = Phi_r.dtype
-    r_n = Phi_r.shape[1]
-    Kxs = kernel.eval(Xp, Xg).to(dt)  # (k, N)
+def _extend_system(kernel, Xall, Phi_cur, nrm2_cur, M_cur, Xp):
+    """EXACT rank-k extension of the working system by k peak points Xp -- a Nystrom basis
+    update, no re-eigendecomposition, O(N r k), ITERABLE (an extended system extends again,
+    enabling multi-round exchange).  The system is (Xall working points, Phi_cur their
+    coordinates in the current basis W, M_cur the coordinate MAP: coord(x) = M_cur @ K(Xall, x),
+    so any function's coords come from kernel columns alone).  The span grows to
+    W' = W + span{(I-Pi_W) a_p}, in which the peak translates lie EXACTLY, so the next IRLS
+    stage can kill their residuals.  With Cq = coords of a_p, S = K(Xp,Xp) - Cq Cq^T the
+    residual Gram, R = sqrtm(S), Rp = its pseudo-inverse:
+        Phi'  = [[Phi_cur, Z], [Cq, R]],  Z = (K(Xall,Xp) - Phi_cur Cq^T) Rp  -- exact coords
+                of all points (row norms <= true, preserving the lower bound's truncation
+                semantics);
+        M'    = [[M_cur, 0], [-Rp Cq M_cur, Rp]]  -- the extended coordinate map, so
+                A = V @ M' collapses any subspace of W' into a kernel-column map for the sup
+                stage (round 1 reproduces the former hand-rolled A2 formula exactly)."""
+    dt = Phi_cur.dtype
+    Kxs = kernel.eval(Xp, Xall).to(dt)  # (k, N_cur)
     Kpp = kernel.eval(Xp, Xp).to(dt)  # (k, k)
-    lam_r = lam[-r_n:]
-    isq = 1.0 / torch.sqrt(lam_r.clamp_min(lam_r.max() * 1e-13))  # (r_n,)
-    C = (Kxs @ U[:, -r_n:]) * isq  # (k, r_n) top-mode coordinates of the peaks
-    S = Kpp - C @ C.T
+    Cq = Kxs @ M_cur.T  # (k, r_cur) coordinates of the peak translates
+    S = Kpp - Cq @ Cq.T
     es, Es = torch.linalg.eigh(0.5 * (S + S.T))  # symmetrized residual Gram
     tau = float(es.max().clamp_min(0)) * 1e-12
     sq = torch.sqrt(es.clamp_min(0))
@@ -302,14 +311,38 @@ def _extend_system(kernel, Xg, lam, U, Phi_r, nrm2, Xp):
     Rp = (
         Es * torch.where(es > tau, 1.0 / sq.clamp_min(1e-300), torch.zeros_like(es))
     ) @ Es.T
-    Z = (Kxs.T - Phi_r @ C.T) @ Rp  # (N, k) grid coordinates on the new directions
-    Phi2 = torch.cat(
-        [torch.cat([Phi_r, Z], 1), torch.cat([C, R], 1)], 0
-    )  # (N+k, r_n+k)
-    nrm2_2 = torch.cat([nrm2, torch.diagonal(Kpp)])
-    return Phi2, nrm2_2, C, Rp, isq
+    Z = (Kxs.T - Phi_cur @ Cq.T) @ Rp  # (N_cur, k) coords on the new directions
+    Phi2 = torch.cat([torch.cat([Phi_cur, Z], 1), torch.cat([Cq, R], 1)], 0)
+    M2 = torch.cat(
+        [
+            torch.cat([M_cur, torch.zeros(M_cur.shape[0], Xp.shape[0], dtype=dt)], 1),
+            torch.cat([-Rp @ Cq @ M_cur, Rp], 1),
+        ],
+        0,
+    )  # (r_cur+k, N_cur+k)
+    nrm2_2 = torch.cat([nrm2_cur, torch.diagonal(Kpp)])
+    return Phi2, nrm2_2, M2
 
 
+def _clamp_threads(fn):
+    """Run fn with torch's CPU pool clamped to min(8, current) threads, restored on exit: the
+    node exposes more vCPUs than physical cores, and any wider OMP region (the many fp64 eighs
+    most of all, ~1000x at r~200) stalls on barriers.  Measured optimal across the whole width
+    computation; pre-set a smaller torch.set_num_threads to go lower."""
+
+    @functools.wraps(fn)
+    def wrap(*a, **kw):
+        nt0 = torch.get_num_threads()
+        torch.set_num_threads(min(8, nt0))
+        try:
+            return fn(*a, **kw)
+        finally:
+            torch.set_num_threads(nt0)
+
+    return wrap
+
+
+@_clamp_threads
 def gelfand_widths(
     kernel,
     X,
@@ -322,17 +355,20 @@ def gelfand_widths(
     refine_iters: int = 80,
     exchange: bool | None = None,
     exch_iter: int = 10,
-    certify_tol: float = 0.02,
+    exch_rounds: int = 2,
+    certify_tol: float = 0.005,
     certify_evals: int = 400_000,
 ):
     """Gelfand widths c_n = d_n(K)_H by a reweighted-SVD (IRLS) minimax with a Remez EXCHANGE step,
     as a monotone bracket (upper, lower).  WHAT IS GUARANTEED:
       LOWER -- RIGOROUS (weak duality / Eckart-Young): c_n >= lower, up to the r_n truncation below
                (measured <= 1e-4 relative).
-      UPPER -- a branch-and-bound CERTIFICATE (c_n <= upper to within certify_tol, no seed luck) on
-               a 1D grid of a dist_bound kernel (Matern, sinc, periodic); elsewhere (Legendre
-               endpoints, d>1) an ESTIMATE via L-BFGS multistart + self-check + a 1D-Mercer endpoint
-               sweep, holding only if the sup search resolved.
+      UPPER -- a branch-and-bound CERTIFICATE (c_n <= upper to within certify_tol, no seed luck)
+               wherever the kernel gives a rigorous modulus: dist_bound (1D stationary) or
+               dist_bound_cell (d>1, Matern; use a looser certify_tol ~0.02 and a larger
+               certify_evals budget there -- see matern.py).  Elsewhere (Legendre endpoints,
+               kernels without a cell modulus) an ESTIMATE via L-BFGS multistart + self-check +
+               a 1D-Mercer endpoint sweep, holding only if the sup search resolved.
 
     Dual ascent is the linear IRLS reweight w <- w*(r2 + floor*r2max).  `floor` is the DAMPING knob,
     not just a zero guard: floor=1 (default) scales weights by r2/r2max + 1 in [1, 2], a smooth step
@@ -418,15 +454,28 @@ def gelfand_widths(
 
     d_in = Xg.shape[1]
     mercer_1d = hasattr(kernel, "feature_map") and d_in == 1
-    certify = refine and d_in == 1 and hasattr(kernel, "dist_bound")
+    # rigorous cell modulus for the B&B certificate: dist_bound at the halfwidth (1D) or the
+    # kernel's own dist_bound_cell (d>1); kernels without one fall back to the multistart.
+    if d_in == 1 and hasattr(kernel, "dist_bound"):
+
+        def cell_mod(H):
+            return kernel.dist_bound(H[:, 0])
+
+    else:
+        cell_mod = getattr(kernel, "dist_bound_cell", None)
+    certify = refine and cell_mod is not None
     do_exch = refine and (not mercer_1d if exchange is None else bool(exchange))
     lo_d, hi_d = domain
 
     def _irls(Phi_w, nrm2_w, w, iters, n):
         """IRLS dual ascent on one working system (stage 1: grid; stage 2: grid+peaks).  Returns
         the best iterate's (grid max, subspace V_p, residuals), the best dual value seen (the
-        rigorous lower bound), and the final weights (warm start for the next call)."""
+        rigorous lower bound), and the final weights (warm start for the next call).  `iters` is
+        a cap: the loop exits once neither bound has moved by a relative 1e-3 for 3 consecutive
+        iterations -- every iterate's bounds are valid alone, so stopping early only saves the
+        r x r eigh per iteration (the dominant cost at large n), never validity."""
         ub, lb, Vb, r2b = float("inf"), 0.0, None, None
+        stall = 0
         for _ in range(iters):
             p = w / w.sum()  # probability weights
             sq = torch.sqrt(p)[:, None] * Phi_w  # (N, r) reweighted features
@@ -438,11 +487,16 @@ def gelfand_widths(
             r2 = torch.clamp(nrm2_w - torch.sum(proj * proj, dim=1), min=0.0)
             r2max = float(r2.max())
             lbi = float((p * r2).sum())  # this iterate's dual value <r, p>
+            stall = (
+                0 if (r2max < ub * (1 - 1e-3) or lbi > lb * (1 + 1e-3)) else stall + 1
+            )
             if r2max < ub:  # keep the best V_p (smallest grid max) for the sup stage
                 ub, Vb, r2b = r2max, Vn.T.clone(), r2
             lb = max(lb, lbi)  # weighted-avg residual: lower bound on c_n
             if r2max <= 0.0:
                 break  # residual exhausted -> subspace already exact on the working set
+            if stall >= 3:
+                break  # both bounds stalled: converged to the damped-IRLS fixed point
             w = w * (r2 + floor * r2max)  # linear IRLS reweight + floor damping
             w = w / w.max()
         return ub, lb, Vb, r2b, w
@@ -450,7 +504,8 @@ def gelfand_widths(
     def _edge_sweep(res2):
         """Dense log-spaced sweep of both endpoints (1-|x| in [1e-10, ~3e-2]): resolves the
         1D-Mercer boundary spike exactly -- it sits within ~1/N^2 of +-1, unreachable by grid
-        nodes or random seeds -- for one feature-map eval, deterministically (no seed luck)."""
+        nodes or random seeds -- for one feature-map eval, deterministically (no seed luck).
+        """
         off = torch.logspace(-10, -1.5, 2000, dtype=dt)
         edge = torch.cat([lo_d + off, hi_d - off]).reshape(-1, 1)
         v = res2(edge)
@@ -459,15 +514,16 @@ def gelfand_widths(
 
     def _sup_of(A, Xp, r2_grid, ub_grid, n):
         """Upper value for the subspace mapped by A over Xp, plus exchange peak seeds:
-        (ub, certified, pts, vals, extra).  1D + dist_bound -> the branch-and-bound CERTIFICATE
-        (falling back to its dense-scan best if it can't converge at the float64 floor); else the
-        L-BFGS multistart estimate with kernel-aware seeds -- a STATIONARY kernel gets ~3n worst-node
-        seeds (~one per inter-node peak, cheap via its analytic gradient), a 1D MERCER kernel keeps
-        the multistart as an interior net (refine_starts seeds) with the endpoint sweep authoritative."""
+        (ub, certified, pts, vals, extra).  With a cell modulus -> the branch-and-bound
+        CERTIFICATE (falling back to its dense-scan best if it can't converge at the float64
+        floor); else the L-BFGS multistart estimate with kernel-aware seeds -- a STATIONARY
+        kernel gets ~3n worst-node seeds (~one per inter-node peak, cheap via its analytic
+        gradient), a 1D MERCER kernel keeps the multistart as an interior net (refine_starts
+        seeds) with the endpoint sweep authoritative."""
         res2, res2_vg = make_res2(A.cpu(), Xp)
         if certify:
             cert, seen, pts, vals, ok = _bnb_sup(
-                res2, kernel.dist_bound, n, dt, domain, certify_tol, certify_evals
+                res2, cell_mod, n, d_in, dt, domain, certify_tol, certify_evals
             )
             return (cert if ok else max(ub_grid, seen)), ok, pts, vals, None
         n_seed = refine_starts if mercer_1d else max(refine_starts, 3 * n)
@@ -499,45 +555,61 @@ def gelfand_widths(
         ub, lb, Vb, r2b, w = _irls(Phi, nrm2, w, n_iter, n)
         if refine and Vb is not None:
             isq = 1.0 / torch.sqrt(lam[-r_n:].clamp_min(lam[-r_n:].max() * 1e-13))
-            A1 = (Vb * isq) @ U[:, -r_n:].T  # kernel columns -> V_p coordinates (n, N)
-            ub, okn, pts, vals, extra = _sup_of(A1, Xg_cpu, r2b, ub, n)
-            if do_exch and pts.shape[0]:
-                # EXCHANGE: the found peaks join the dual set; a short warm IRLS re-optimizes the
-                # subspace against them and its sup replaces the upper bound when smaller.  Each
-                # stage's bound is valid alone -> max of lowers, min of uppers.
-                peaks = _pick_peaks(
-                    pts,
-                    vals,
-                    n_keep=min(int(1.5 * n) + 8, 400),  # ~1 slot per residual peak
-                    min_sep=(hi_d - lo_d) / (8.0 * max(n, 4)),
-                    extra=extra,
-                )
-                if peaks.shape[0]:
+            M_cur = (
+                isq[:, None] * U[:, -r_n:].T
+            )  # coordinate map: coord(x) = M @ K(Xg, x)
+            ub, okn, pts, vals, extra = _sup_of(Vb @ M_cur, Xg_cpu, r2b, ub, n)
+            if do_exch:
+                # EXCHANGE, up to exch_rounds Remez rounds: each round's off-grid residual
+                # peaks join the dual set via the exact rank-k extension (_extend_system,
+                # iterable through its coordinate map M), a short warm IRLS re-optimizes, and
+                # the resolved sup replaces the upper bound when smaller.  Each stage's bound
+                # is valid alone -> max of lowers, min of uppers.
+                Xall, Xall_cpu = Xg, Xg_cpu
+                Phi_cur, nrm2_cur, w_cur = Phi, nrm2, w
+                for _ in range(exch_rounds):
+                    if not pts.shape[0]:
+                        break
+                    peaks = _pick_peaks(
+                        pts,
+                        vals,
+                        n_keep=min(int(1.5 * n) + 8, 400),  # ~1 slot per residual peak
+                        min_sep=(hi_d - lo_d) / (8.0 * max(n, 4)),
+                        extra=extra,
+                    )
+                    if not peaks.shape[0]:
+                        break
                     peaks = peaks.to(dtype=dt, device=Xg.device)
-                    Phi2, nrm2_2, C, Rp, isq2 = _extend_system(
-                        kernel, Xg, lam, U, Phi, nrm2, peaks
+                    Phi_cur, nrm2_cur, M_cur = _extend_system(
+                        kernel, Xall, Phi_cur, nrm2_cur, M_cur, peaks
                     )
                     k = peaks.shape[0]
-                    # new points enter at the current max weight: they ARE the worst points known
-                    w2 = torch.cat(
-                        [w, torch.full((k,), float(w.max()), dtype=dt, device=w.device)]
+                    # new points enter at the current max weight: they ARE the worst known
+                    w_cur = torch.cat(
+                        [
+                            w_cur,
+                            torch.full(
+                                (k,), float(w_cur.max()), dtype=dt, device=w_cur.device
+                            ),
+                        ]
                     )
-                    ubg2, lb2, Vb2, r2b2, _ = _irls(Phi2, nrm2_2, w2, exch_iter, n)
+                    Xall = torch.cat([Xall, peaks], 0)
+                    Xall_cpu = torch.cat([Xall_cpu, peaks.cpu()], 0)
+                    ubg2, lb2, Vb2, r2b2, w_cur = _irls(
+                        Phi_cur, nrm2_cur, w_cur, exch_iter, n
+                    )
                     lb = max(lb, lb2)
-                    if Vb2 is not None:
-                        # collapse the stage-2 subspace into a kernel-column map over grid+peaks
-                        V_old, V_new = Vb2[:, :r_n], Vb2[:, r_n:]
-                        A2 = torch.cat(
-                            [
-                                ((V_old - V_new @ Rp @ C) * isq2) @ U[:, -r_n:].T,
-                                V_new @ Rp,
-                            ],
-                            1,
-                        )
-                        Xg2_cpu = torch.cat([Xg_cpu, peaks.cpu()], 0)
-                        ub2, ok2, _, _, _ = _sup_of(A2, Xg2_cpu, r2b2, ubg2, n)
-                        if ub2 < ub:
-                            ub, okn = ub2, ok2
+                    # stop when this stage provably cannot win: every _sup_of value is >=
+                    # its working-set max ubg2, so ubg2 >= ub keeps the standing bound.
+                    if Vb2 is None or ubg2 >= ub:
+                        break
+                    ub2, ok2, pts, vals, extra = _sup_of(
+                        Vb2 @ M_cur, Xall_cpu, r2b2, ubg2, n
+                    )
+                    if ub2 < ub:
+                        ub, okn = ub2, ok2
+                    else:
+                        break  # no improvement -> further rounds won't either
             if certify and not okn:
                 uncert_ns.append(n)
         upper.append(ub**0.5)
@@ -565,8 +637,9 @@ def gelfand_widths(
     if uncert_ns:
         warnings.warn(
             f"gelfand_widths: branch-and-bound certificate did not converge within "
-            f"certify_evals at n={uncert_ns} (widths at the float64 noise floor?) -- "
-            f"the upper bound there is the dense-scan estimate, not a certificate.",
+            f"certify_evals at n={uncert_ns} -- the upper bound there is the dense-scan "
+            f"estimate, not a certificate (typical causes: widths at the float64 noise "
+            f"floor, or a near-flat residual field at small n or in d>1).",
             stacklevel=2,
         )
     return up, lo
@@ -584,6 +657,8 @@ def sampling_vs_gelfand(
     refine_iters: int = 80,
     edge_ladder: int = 120,
     exchange: bool | None = None,
+    certify_tol: float = 0.005,
+    certify_evals: int = 400_000,
 ):
     """Sampling numbers g_m^lin and Gelfand widths c_n of one kernel on [-1,1]^d -- the two curves
     the theorem compares.  dtype follows the kernel.  The c_n bracket machinery (see gelfand_widths)
@@ -599,7 +674,8 @@ def sampling_vs_gelfand(
       n_used      -- P-greedy centers placed (stops when Pow^2 -> 0)
       d           -- domain dimension.
     refine_starts/refine_iters control the multistart sup search where it still applies (Legendre,
-    d>1); the defaults resolve 1D, but a sparser high-d grid needs more starts (see matern.py, d=3)."""
+    d>1); the defaults resolve 1D, but a sparser high-d grid needs more starts (see matern.py, d=3).
+    """
     dt = kernel.dtype
     # Device split (measured): P-greedy is ~14x on GPU (big feature matvecs), but the width
     # IRLS is GPU-hostile in float64 (many small fp64 eighs + syncs).  So greedy on GPU, c_n on CPU.
@@ -632,6 +708,8 @@ def sampling_vs_gelfand(
         refine_starts=refine_starts,
         refine_iters=refine_iters,
         exchange=exchange,
+        certify_tol=certify_tol,
+        certify_evals=certify_evals,
     )
     return dict(
         m_list=m_list,

@@ -1,0 +1,5 @@
+# float64 pipeline (all drivers); tested with torch 2.13 / numpy 2.2 / scipy 1.14 on Python 3.12
+numpy
+scipy
+torch
+matplotlib

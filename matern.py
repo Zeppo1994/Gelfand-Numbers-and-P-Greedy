@@ -33,12 +33,26 @@ def rates_figure():
         (
             1,
             MaternKernel(nu=1.5, ell=0.3),
-            dict(m_max=460, sel_grid=16000, cn_grid=2000, n_cap=300),
+            dict(
+                m_max=460,
+                sel_grid=16000,
+                cn_grid=2000,
+                n_cap=300,
+                certify_evals=1_500_000,
+            ),
         ),
         (
             3,
             MaternKernel(nu=1.5, ell=0.6),
-            dict(m_max=400, sel_grid=20000, cn_grid=8000, n_cap=140, refine_iters=100),
+            dict(
+                m_max=400,
+                sel_grid=20000,
+                cn_grid=8000,
+                n_cap=140,
+                refine_iters=100,
+                certify_tol=0.02,
+                certify_evals=1_500_000,
+            ),
         ),
     ]
 

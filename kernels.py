@@ -20,6 +20,7 @@ Tensors default to float64 (the stability the greedy basis needs); override via 
 """
 
 from __future__ import annotations
+import heapq
 import math
 import numpy as np
 import torch
@@ -48,7 +49,8 @@ def normalized_legendre(
     # normalization factor sqrt((2k+1)/2)
     k_idx = torch.arange(n_trunc, dtype=dtype, device=x.device)
     norm = torch.sqrt((2.0 * k_idx + 1.0) / 2.0)
-    return L * norm  # (N, n_trunc)
+    return L.mul_(norm)  # (N, n_trunc); in-place -- a second full-size temporary
+    # would double the peak memory of a large feature cache
 
 
 class LegendreMercerKernel:
@@ -58,7 +60,10 @@ class LegendreMercerKernel:
     K(.,x) -- exposed because widths.py needs it.
 
     s: smoothness (paper needs s > 1 for a bounded kernel).  n_trunc: Mercer truncation, chosen
-    >> #greedy points; the tail is O(k^{1-2s}), so K(x,x) truncation error is O(n_trunc^{2-2s}).
+    >> #greedy points; the tail is O(k^{1-2s}), so K(x,x) truncation error is O(n_trunc^{2-2s}),
+    maximal at x=+-1 (~1/(2 n_trunc^2) for s=2) -- where the width endpoint spike lives.  Keep it
+    well below the smallest tracked c_n^2: the c_n endpoint sweep sees the bias in full, while the
+    greedy's endpoint-clustered centers cancel it.
 
     Conventions (verified vs the paper, Section 7.3): reference measure Lebesgue dx, NOT dx/2 --
     giving sup_x sum_{k<m} P_k(x)^2 = m^2/2 at x=+-1, matching N(m)=(m-1)^2/2 up to index shift;
@@ -95,7 +100,9 @@ class LegendreMercerKernel:
         """phi(X): (N, n_trunc), rows are the RKHS coordinates of a_x = K(.,x)."""
         X = X.reshape(-1)
         P = normalized_legendre(X, self.n_trunc, self.dtype)  # (N, n_trunc)
-        return P * self.sqrt_mu.to(P.device)  # broadcast over columns
+        return P.mul_(
+            self.sqrt_mu.to(P.device)
+        )  # broadcast over columns (in-place: P local)
 
     def eval(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
         """Gram matrix K(X, Y): (Nx, Ny)."""
@@ -200,6 +207,12 @@ class MaternKernel:
         separations; consumed by the branch-and-bound sup certificate in widths (d=1).
         """
         return torch.sqrt(torch.clamp(2.0 * (1.0 - self._corr(h)), min=0.0))
+
+    def dist_bound_cell(self, H: torch.Tensor) -> torch.Tensor:
+        """Cell modulus for the d>1 branch-and-bound sup certificate: the farthest cell point
+        sits at the corner, so dist_bound at the half-diagonal ||H||_2 bounds the cell (exact
+        for Matern at any d -- the modulus only sees the Euclidean distance)."""
+        return self.dist_bound(torch.linalg.vector_norm(H, dim=1))
 
     # ---- grid-cache interface used by the strong greedy loop ----
     def prepare(self, Xd: torch.Tensor):
@@ -328,6 +341,47 @@ class PeriodicSobolevMixedKernel:
             torch.clamp(2.0 * (self._k1_0 - self._k1(torch.clamp(h, max=0.5))), min=0.0)
         )
 
+    def gelfand_tails(self, n_max: int) -> np.ndarray:
+        r"""EXACT Gelfand widths of the translate set on the full torus, by symmetry.  The set
+        {a_x : x in T^d} is an orbit of the translation group and the kernel is diagonal in
+        characters, so (averaging over Haar measure; Pinkus, n-widths of orbits) the top-n
+        character span is an optimal subspace and
+
+            c_n^2 = sum_{k > n} lambda_k,   lambda sorted descending, cos/sin pairs twice.
+
+        Exact whenever n closes a degenerate shell (lambda_{n-1} > lambda_n strictly); at a
+        mid-shell n it is the exact LOWER end of the interval [sqrt(tail_n), sqrt(tail_shell)]
+        containing c_n (a real invariant subspace needs whole cos/sin multiplets).
+
+        Returns tails[n] = c_n^2 for n = 0..n_max: trace k_1(0)^d minus the exact top-n sum
+        (top modes enumerated by a lattice max-heap, no truncated-box error).  float64
+        cancellation floors the tails near ~1e-16 * k_1(0)^d, i.e. c_n below ~1e-8 is noise.
+        """
+        Kdim = n_max + 2  # single-axis modes alone outrank anything with k > n_max
+        vals = [1.0] + [(2.0 * math.pi * k) ** (-2 * self.m) for k in range(1, Kdim)]
+        mult = [1] + [2] * (Kdim - 1)  # +-k <-> cos/sin pair
+        heap = [
+            (-1.0, (0,) * self.d)
+        ]  # (-product eigenvalue, per-dim distinct-value index)
+        seen = {(0,) * self.d}
+        lam, count = [], 0
+        while heap and count <= n_max:
+            negv, idx = heapq.heappop(heap)
+            m_k = 1
+            for j in idx:
+                m_k *= mult[j]
+            lam.extend([-negv] * m_k)
+            count += m_k
+            for c in range(self.d):  # lattice neighbors: one index up per coordinate
+                nidx = idx[:c] + (idx[c] + 1,) + idx[c + 1 :]
+                if nidx not in seen and nidx[c] < Kdim:
+                    seen.add(nidx)
+                    heapq.heappush(heap, (negv * vals[nidx[c]] / vals[idx[c]], nidx))
+        top = np.cumsum(np.array(lam[: n_max + 1]))
+        return np.concatenate([[self._k1_0**self.d], self._k1_0**self.d - top])[
+            : n_max + 1
+        ]
+
     # ---- grid-cache interface used by the strong greedy loop ----
     def prepare(self, Xd: torch.Tensor):
         self._Xd = Xd.reshape(Xd.shape[0], -1).to(self.dtype)
@@ -363,7 +417,7 @@ class PaleyWienerSincKernel:
     NUMERICAL FLOOR: band-limited => a Gram over N >> N_eff points has numerical rank ~ N_eff, so the
     float64 widths recover reliably only above the floor ~sqrt(eps)*sqrt(K(x,x)) ~ 1e-7 (n <~ N_eff);
     past the cliff the recovered values ARE the floor.  The true super-exponentially small widths there
-    can be recovered in arbitrary precision -- see archive/high_precision_paley_wiener/.
+    would need an arbitrary-precision (mpmath) reimplementation of the width minimax.
     """
 
     name = "paley_wiener_sinc"

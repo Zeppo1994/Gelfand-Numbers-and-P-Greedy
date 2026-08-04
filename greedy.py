@@ -105,7 +105,7 @@ def power_function(kernel, P: torch.Tensor, Xq: torch.Tensor) -> torch.Tensor:
     """
     dt = kernel.dtype
     Kpp = kernel.eval(P, P) + 1e-12 * torch.eye(
-        P.shape[0], dtype=dt
+        P.shape[0], dtype=dt, device=P.device
     )  # jitter for a stable solve
     Kqp = kernel.eval(Xq, P)
     sol = torch.linalg.solve(Kpp, Kqp.T)

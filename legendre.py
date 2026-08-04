@@ -33,7 +33,7 @@ torch.manual_seed(0)
 
 
 def rates_figure(
-    s=2.0, n_trunc=12000, max_iter=1000, sel_grid=20000, cn_grid=5000, n_cap=1000
+    s=2.0, n_trunc=24000, max_iter=1000, sel_grid=20000, cn_grid=5000, n_cap=1000
 ):
     kernel = LegendreMercerKernel(s=s, n_trunc=n_trunc)
     r = widths.sampling_vs_gelfand(

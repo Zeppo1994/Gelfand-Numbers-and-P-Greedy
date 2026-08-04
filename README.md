@@ -23,8 +23,9 @@ so `g_m^lin ≲ c_n` and the ratio `g_m/c_n` stays **bounded**.
 
 ## What the code shows
 
-The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.31 (1D),
-1.25 (`d=3`); periodic `H^m_mix` 1.47–2.14 across `m=1..3`, `d=2,3`; band-limited sinc 0.98 (flat regime). Ratios are quoted against `c_n⁺`.
+The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` median 2.37 (1D),
+1.32 (`d=3`, certified `c_n⁺`); periodic `H^m_mix` 1.46–2.18 across `m=1..3` (`d=2`) and
+`m=1,2` (`d=3`); band-limited sinc 1.00 (flat regime). Ratios are quoted against `c_n⁺`.
 
 ## Files
 
@@ -40,6 +41,9 @@ The **ratio `g_m/c_n` remains bounded** (no `√n` growth) — Matérn `ν=3/2` 
 
 ## Usage
 
+Requires Python ≥ 3.10 with `numpy`, `scipy`, `torch`, `matplotlib` (see `requirements.txt`);
+a CUDA device is used automatically when available, but everything runs on CPU.
+
 ```bash
 python legendre.py       # Legendre s=2: sampling-vs-Gelfand figure + P-greedy design
 python matern.py         # Matérn ν=3/2 (d=1,3): bounded-ratio check + P-greedy design
@@ -49,6 +53,13 @@ python paley_wiener.py   # band-limited kernel: the N_eff cliff in float64 + des
 
 Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where applicable,
 `<kernel>_points.png` (the P-greedy design).
+
+## Figures
+
+| | |
+|---|---|
+| ![Legendre](legendre.png) | ![Matérn](matern.png) |
+| ![periodic mixed Sobolev](periodic_mixed.png) | ![Paley–Wiener](paley_wiener.png) |
 
 ## Method notes
 
@@ -69,16 +80,22 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
   Returned as a **bracket `[c_n⁻, c_n⁺]`**:
     * `c_n⁻` (lower) — **rigorous** (weighted-average residual `= Σ_{k>n} λ_k(C_p)`, weak duality),
       so `c_n⁻ ≤ c_n`.
-    * `c_n⁺` (upper) — on a **1D grid with a `dist_bound` modulus** (Matérn, sinc, periodic) a
-      **branch-and-bound certificate**: each cell bounded by `r(center) + dist_bound(halfwidth)`,
-      bisect what exceeds the incumbent, prune the rest. Where no modulus exists — **Legendre** (endpoint
-      modulus diverges) and **`d>1`** (cells explode) — `c_n⁺` is a **numerical estimate**: L-BFGS-B
-      multistart from two polished seed sets + a disagreement **self-check**, plus the **endpoint
-      sweep** (1D Mercer) for the boundary spike.
+    * `c_n⁺` (upper) — wherever the kernel gives a **rigorous modulus** (`dist_bound`, 1D
+      stationary; `dist_bound_cell`, Matérn any `d`) a **branch-and-bound certificate**: each
+      (hyperrectangle) cell bounded by `r(center) + modulus(halfwidths)`, bisect what exceeds the
+      incumbent along its longest axis, prune the rest. Without a modulus — **Legendre** (endpoint
+      modulus diverges) and **periodic `d>1`** (orbit-flat residual, but see the exact reference
+      below) — `c_n⁺` is a **numerical estimate**: L-BFGS-B multistart from two polished seed sets
+      + a disagreement **self-check**, plus the **endpoint sweep** (1D Mercer) for the boundary spike.
     * **exchange** (stationary default): the off-grid residual peaks rejoin the dual set, the basis
       is extended *exactly* by their translates (Nyström update, no re-eigendecomposition), a short
-      warm IRLS re-optimizes; `max` of lowers / `min` of uppers is kept. For **Legendre** exchange is auto-off (the spike re-emerges at a new offset);
+      warm IRLS re-optimizes — iterated for up to `exch_rounds` Remez rounds; `max` of lowers /
+      `min` of uppers is kept. For **Legendre** exchange is auto-off (the spike re-emerges at a new offset);
       instead the `c_n` grid gets a **geometric endpoint ladder** (`box_grid(edge_ladder=120)`).
+    * **periodic exact reference**: on the full torus the translate set is a translation-group
+      orbit, so `c_n² = Σ_{k>n} λ_k` **exactly** at closed cos/sin shells
+      (`PeriodicSobolevMixedKernel.gelfand_tails`, overlaid in `periodic_mixed.png`) — ground truth
+      that the numerical bracket is checked against.
     * monotone envelopes: `c_n⁺ ← min_{k≤n} c_k⁺` (**subspace nesting**; certified entries stay
       certificates) and `c_n⁻ ← max_{m≥n} c_m⁻`.
   Kernel-agnostic (needs `kernel.eval`; `dist_bound` → certificate, `feature_map` → Mercer speed,
@@ -104,11 +121,11 @@ Each driver writes `<kernel>.png` (the `g_m^lin` vs `c_n` comparison) and, where
   * **Legendre** — no finite endpoint modulus; the estimate leans on the endpoint sweep + the
     `edge_ladder` grid (which fixed the historical `~20%` undershoot: the peak sits within `~3·10⁻⁷`
     of `±1`, the innermost plain-Chebyshev node at `~1/N`).
-  * **`d>1`** — multistart L-BFGS-B: too few starts silently under-resolves the sup, so `c_n⁺` can
-    drop *below* the true value. Mitigations (dual-sampler max, `~3n` starts, disagreement warning,
-    exchange re-optimizing against the found peaks) make this unlikely, not impossible — the failure
-    is real (on 1D Matérn the certificate caught a lean multistart 10% low). The `d=3` Matérn is the
-    stress case, needing a denser (`8000`-point) grid.
+  * **`d>1` without a cell modulus** (periodic) — multistart L-BFGS-B: too few starts silently
+    under-resolves the sup, so `c_n⁺` can drop *below* the true value; the exact orbit reference
+    covers that kernel anyway. Matérn `d>1` **is certified** (hyperrectangle B&B via
+    `dist_bound_cell`, `certify_tol≈0.02` — the multistart it replaced was caught 4–10% low at
+    practical budgets).
   * **at the float64 noise floor** (band-limited kernel past `N_eff`) no budget certifies;
     `gelfand_widths` warns and falls back to its dense-scan best (the floored values carry no
     information anyway).
