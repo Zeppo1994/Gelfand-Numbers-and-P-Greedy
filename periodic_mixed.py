@@ -123,7 +123,7 @@ def rates_figure():
                 PeriodicSobolevMixedKernel(m=m, d=d, dtype=torch.float64, device="cpu"),
                 Xc,
                 ns_c,
-                n_iter=12,
+                n_iter=20,
                 refine=True,
                 refine_starts=32,
                 refine_iters=40,
