@@ -409,7 +409,7 @@ class PaleyWienerSincKernel:
         N_eff = 2c/pi   (Shannon number / time-bandwidth product).
 
     So sigma_k = sqrt(lambda_k) are flat then plunge at k ~ N_eff -- not the regularly-varying decay
-    the theorem of MAIN_Sampl_vs_Gelfand.tex assumes, hence a stress test: g_m^lin and c_n are both
+    the theorem in the companion manuscript assumes, hence a stress test: sampling-number estimates and c_n are
     ~flat then fall off the same cliff.  Univariate; provides an analytic eval_grad (exact off-grid
     width refinement) and singular_numbers() (the Nystrom prolate spectrum).  Domain [-1,1], so it
     drops into box_grid / widths / greedy unchanged.

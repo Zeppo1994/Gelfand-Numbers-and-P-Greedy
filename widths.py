@@ -1,19 +1,26 @@
 """
-Sampling numbers and Gelfand widths of a bounded-kernel RKHS on the box D=[-1,1]^d, in the
-notation of MAIN_Sampl_vs_Gelfand.tex.
+Sampling numbers and Gelfand widths of a bounded-kernel RKHS on a box, in the notation of the
+companion manuscript.
 
-  * g_m^lin = inf_{|P|=m} ||Pow_P||_inf -- LINEAR SAMPLING NUMBERS, realized by P-greedy points
-    (weak greedy, gamma=1/2): the running sup power of the P-greedy design on a fine grid.
+  * g_m^lin = inf_{|P|=m} ||Pow_P||_inf -- LINEAR SAMPLING NUMBERS.  The code uses this original
+    notation for the numerical estimate obtained from the
+    running grid-sup power of one constructive P-greedy design.  Its exact grid argmax has gamma=1
+    relative to that grid; gamma=1/2 on the full domain would additionally require the unresolved
+    true supremum to be at most twice the grid maximum.  The result is therefore a numerical upper
+    surrogate for g_m^lin rather than the infimum itself.
   * c_n = d_n(K)_H = inf_{dim V=n} sup_x dist(a_x, V) -- GELFAND WIDTHS, the Kolmogorov width of
     the translates {K(.,x)} by a reweighted-SVD (IRLS) minimax with a Remez EXCHANGE step,
-    returned as a bracket [lower, upper]: lower rigorous (weak duality), upper a branch-and-bound
-    CERTIFICATE where the kernel gives a rigorous modulus (dist_bound, 1D; dist_bound_cell, d>1)
-    and an off-grid sup estimate otherwise (Legendre endpoints) -- see gelfand_widths.  NOT the top-n Mercer
+    returned as a rigorous lower plus an upper value: the latter is a branch-and-bound certificate
+    where the kernel gives a rigorous modulus and the budget converges, and an off-grid estimate
+    otherwise -- see gelfand_widths.  NOT the top-n Mercer
     eigenspace, which overshoots by ~sqrt(n).
 (sigma_n = sqrt(mu_n), exact for a Mercer kernel, are read off kernel.sqrt_mu in legendre.py.)
 
-Theorem under test (Carl-type comparison + Corollary): c_n <= g_m^lin <~ c_n, so g_m/c_n stays
-BOUNDED -- the sqrt(n) of the general KPUU bound g_{2n} <= C sqrt(n) c_n drops for a bounded kernel.
+Theorem under test (Carl-type comparison + Corollary): under its stated decay/weight assumptions,
+the admissible regularly-varying decay scale transfers from c_n to g_m^lin, removing the sqrt(n)
+loss in the general KPUU bound g_{2n} <= C sqrt(n) c_n along that scale.  Boundedness of the kernel
+alone does not imply a pointwise g_n^lin <~ c_n estimate.  The Paley-Wiener experiment is an
+empirical stress test outside the comparison theorem's hypotheses.
 
 Kernel-agnostic: needs kernel.eval / diagonal.  The upper bound sharpens with what the kernel
 offers -- dist_bound (rigorous modulus) -> the 1D certificate, eval_grad -> exact d>1 multistart
@@ -77,6 +84,95 @@ def log_spaced_ints(hi: int, count: int) -> np.ndarray:
     loglog markers don't pile up at large index.  hi clamped to >=1 (a degenerate n_used==1 -> hi==0
     would hit geomspace's zero-endpoint error)."""
     return np.unique(np.round(np.geomspace(1, max(int(hi), 1), count)).astype(int))
+
+def plot_gelfand_bounds(
+    ax,
+    n,
+    lower,
+    upper,
+    upper_certified=None,
+    *,
+    color="C1",
+    series_label=None,
+    alpha=0.30,
+    linewidth=0.9,
+):
+    """Plot c_n lower/upper values with a certification-aware visual convention.
+
+    The rigorous lower value c_n^- is always a solid edge.  A certified c_n^+ is
+    drawn solid with the usual filled band; an uncertified numerical c_n^+ is
+    dashed with a lighter band.  Missing certification metadata is treated as
+    uncertified, never as a proof.
+
+    Returns a dictionary of the created artists.  Entries for an absent
+    certified/estimated subset are None.
+    """
+    n = np.asarray(n)
+    lower = np.asarray(lower)
+    upper = np.asarray(upper)
+    if not (n.shape == lower.shape == upper.shape):
+        raise ValueError("n, lower, and upper must have the same shape")
+    if upper_certified is None:
+        certified = np.zeros(n.shape, dtype=bool)
+    else:
+        certified = np.asarray(upper_certified, dtype=bool)
+        if certified.shape != n.shape:
+            raise ValueError("upper_certified must have the same shape as n")
+
+    suffix = f", {series_label}" if series_label else ""
+    artists = {
+        "lower": ax.loglog(n, lower, "-", color=color, lw=linewidth)[0],
+        "certified_upper": None,
+        "estimated_upper": None,
+        "certified_fill": None,
+        "estimated_fill": None,
+    }
+
+    if certified.any():
+        artists["certified_fill"] = ax.fill_between(
+            n,
+            lower,
+            upper,
+            where=certified,
+            color=color,
+            alpha=alpha,
+            lw=0,
+            label=r"$c_n^- \leq c_n \leq c_n^+$ (certified)" + suffix,
+        )
+        artists["certified_upper"] = ax.loglog(
+            n,
+            np.where(certified, upper, np.nan),
+            "-",
+            color=color,
+            lw=linewidth,
+            marker=".",
+            ms=3,
+        )[0]
+
+    estimated = ~certified
+    if estimated.any():
+        artists["estimated_fill"] = ax.fill_between(
+            n,
+            lower,
+            upper,
+            where=estimated,
+            color=color,
+            alpha=0.35 * alpha,
+            lw=0,
+            label=r"$c_n^-$ to estimated $c_n^+$" + suffix,
+        )
+        artists["estimated_upper"] = ax.loglog(
+            n,
+            np.where(estimated, upper, np.nan),
+            "--",
+            color=color,
+            lw=1.15 * linewidth,
+            marker=".",
+            ms=3,
+        )[0]
+
+    return artists
+
 
 
 def _refine_sup(
@@ -349,8 +445,8 @@ def gelfand_widths(
     n_list,
     n_iter: int = 20,
     floor: float = 1.0,
-    rank=None,
     refine: bool = True,
+    compress_irls: bool = True,
     refine_starts: int = 64,
     refine_iters: int = 80,
     exchange: bool | None = None,
@@ -358,11 +454,13 @@ def gelfand_widths(
     exch_rounds: int = 2,
     certify_tol: float = 0.005,
     certify_evals: int = 400_000,
+    return_info: bool = False,
 ):
     """Gelfand widths c_n = d_n(K)_H by a reweighted-SVD (IRLS) minimax with a Remez EXCHANGE step,
-    as a monotone bracket (upper, lower).  WHAT IS GUARANTEED:
-      LOWER -- RIGOROUS (weak duality / Eckart-Young): c_n >= lower, up to the r_n truncation below
-               (measured <= 1e-4 relative).
+    as a monotone lower/upper pair.  WHAT IS GUARANTEED:
+      LOWER -- RIGOROUS (weak duality / Eckart-Young): c_n >= lower.  With a truncated coordinate
+               system, the lower bound uses only the represented energy, so truncation can loosen
+               but cannot overstate it.
       UPPER -- a branch-and-bound CERTIFICATE (c_n <= upper to within certify_tol, no seed luck)
                wherever the kernel gives a rigorous modulus: dist_bound (1D stationary) or
                dist_bound_cell (d>1, Matern; use a looser certify_tol ~0.02 and a larger
@@ -375,10 +473,14 @@ def gelfand_widths(
     whose stable trajectory makes the grid-max subspace selection well-behaved OFF-grid; the
     aggressive floor=1e-3 climbs the dual slightly faster but oscillates (Matern 1D ratios 1.19-1.28
     vs 1.04-1.08; Legendre 1.29 vs 1.06 at n=200, with no better lower bound).  One eigendecomposition
-    gives Phi = U sqrt(Lam); per n only the top r_n = 3n+100 modes (where V_p lives) enter, matching
-    full rank to ~1e-4 -- the only lower-bound caveat, as the compressed subspace can slightly
-    overstate the dual tail (<= 1e-4 rel here).  Each IRLS step takes the top-n right-singular
-    subspace V_p and brackets  sum_i p_i dist(a_x_i, V_p)^2 <= c_n^2 <= sup_x dist(a_x, V_p)^2.
+    gives Phi = U sqrt(Lam).  With `compress_irls=True` (the practical default), only the top
+    r_n = min(N, 3n+100) modes enter the IRLS eigensolve for index n.  With
+    `compress_irls=False`, all N coordinates are used, matching the full-coordinate manuscript
+    algorithm.  Under compression, discarded
+    coordinate energy is excluded from the lower bound: the retained covariance tail is therefore
+    conservative.
+    Each IRLS step takes the top-n right-singular subspace V_p and brackets a retained-coordinate
+    covariance tail below c_n^2 and sup_x dist(a_x, V_p)^2 above it.
 
     EXCHANGE (default on without a feature_map; `exchange` overrides): stage-1's off-grid residual
     peaks rejoin the dual point set, the basis is extended EXACTLY (_extend_system, O(N r_n k)), IRLS
@@ -389,9 +491,11 @@ def gelfand_widths(
     boundary-concentrated Mercer kernel (the endpoint spike just re-emerges at a new offset); there
     the box_grid edge_ladder fixes the cause and the endpoint sweep resolves the sup.
 
-    refine=False returns the grid max (no certificate, no exchange).  rank pins r_n (=N: full).
+    refine=False returns the grid max (no certificate, no exchange).
     Where the certificate can't converge within certify_evals -- widths at the float64 floor, e.g.
     the band-limited kernel past N_eff -- it falls back to the B&B's best evaluated value and warns.
+    With return_info=True, a third result contains `upper_certified`, a boolean array propagated
+    through the monotone upper envelope.
     Reliable for n <~ N/5; beyond it V_p interpolates the N translates, the residual vanishes at
     every node, and the upper bound collapses (sampling_vs_gelfand caps n there)."""
     dt = kernel.dtype
@@ -484,9 +588,17 @@ def gelfand_widths(
             _, evecs = torch.linalg.eigh(sq.T @ sq)  # ascending; top-n = last n columns
             Vn = evecs[:, -n:]  # (r, n) top-n right singular vectors; span = V_p
             proj = Phi_w @ Vn
-            r2 = torch.clamp(nrm2_w - torch.sum(proj * proj, dim=1), min=0.0)
+            proj2 = torch.sum(proj * proj, dim=1)
+            # Upper residual: retain the full kernel norm, including energy outside the
+            # compressed working coordinates.  This is the distance to the represented Vn.
+            r2 = torch.clamp(nrm2_w - proj2, min=0.0)
             r2max = float(r2.max())
-            lbi = float((p * r2).sum())  # this iterate's dual value <r, p>
+            # Dual lower bound: use only the covariance tail inside the represented coordinate
+            # system.  Eigenvalue interlacing makes this tail no larger than the full covariance
+            # tail, whereas using `nrm2_w` here would count all discarded energy as residual and
+            # could overstate the dual optimum.
+            r2_dual = torch.clamp(torch.sum(Phi_w * Phi_w, dim=1) - proj2, min=0.0)
+            lbi = float((p * r2_dual).sum())
             stall = (
                 0 if (r2max < ub * (1 - 1e-3) or lbi > lb * (1 + 1e-3)) else stall + 1
             )
@@ -542,15 +654,15 @@ def gelfand_widths(
         disagree.append((max(0.0, v_rand - v_grid) / max(v_grid, 1e-30), n))
         return ub, False, pts, vals, extra
 
-    upper, lower, uncert_ns, disagree = [], [], [], []
+    upper, lower, upper_certified, uncert_ns, disagree = [], [], [], [], []
     # Warm-start the dual weights across the ascending n_list: the worst-case weight moves smoothly
     # in n, so seeding each n from the previous n's final weights cuts the re-convergence iterations.
     w = torch.ones(N, dtype=dt, device=G.device)
     for n in n_list:
         n = int(n)
-        # per-n rank: V_p lives in the top ~2n modes, so r_n = 3n+100 matches full rank while
-        # keeping the r_n x r_n Gram eigenproblem small.  rank=<int> pins it.
-        r_n = min(N, 3 * n + 100) if rank is None else min(N, int(rank))
+        okn = False
+        # Compression is the practical default; full mode follows the manuscript algorithm.
+        r_n = min(N, 3 * n + 100) if compress_irls else N
         Phi = Phi_all[:, -r_n:]  # (N, r_n) top r_n modes
         ub, lb, Vb, r2b, w = _irls(Phi, nrm2, w, n_iter, n)
         if refine and Vb is not None:
@@ -614,6 +726,7 @@ def gelfand_widths(
                 uncert_ns.append(n)
         upper.append(ub**0.5)
         lower.append(lb**0.5)
+        upper_certified.append(okn)
     # Monotone envelope (c_n is non-increasing in n; n_list ascending, as log_spaced_ints builds it):
     #   LOWER  c_n >= max_{m>=n} c-_m -- each c-_m is a rigorous lower bound, so borrowing a larger
     #          one from m>=n is valid.
@@ -624,7 +737,8 @@ def gelfand_widths(
     lo = torch.flip(
         torch.cummax(torch.flip(torch.tensor(lower, dtype=dt), [0]), dim=0).values, [0]
     )
-    up = torch.cummin(torch.tensor(upper, dtype=dt), dim=0).values
+    up, up_source = torch.cummin(torch.tensor(upper, dtype=dt), dim=0)
+    cert = torch.tensor(upper_certified, dtype=torch.bool)[up_source]
     if disagree:
         frac, n_bad = max(disagree)
         if frac > 0.05:
@@ -642,6 +756,8 @@ def gelfand_widths(
             f"floor, or a near-flat residual field at small n or in d>1).",
             stacklevel=2,
         )
+    if return_info:
+        return up, lo, {"upper_certified": cert.cpu().numpy()}
     return up, lo
 
 
@@ -659,20 +775,27 @@ def sampling_vs_gelfand(
     exchange: bool | None = None,
     certify_tol: float = 0.005,
     certify_evals: int = 400_000,
+    compress_irls: bool = True,
 ):
-    """Sampling numbers g_m^lin and Gelfand widths c_n of one kernel on [-1,1]^d -- the two curves
-    the theorem compares.  dtype follows the kernel.  The c_n bracket machinery (see gelfand_widths)
+    """Numerical estimates of the sampling numbers g_m^lin and Gelfand widths c_n of one kernel
+    on [-1,1]^d.  The sampling-number estimates are constructive upper surrogates.  dtype follows the kernel.  The c_n
+    lower/upper machinery (see gelfand_widths)
     is on by default: the exchange step (auto per kernel; `exchange` overrides), the branch-and-bound
     certificate on 1D dist_bound kernels, and -- for a boundary-concentrated (Chebyshev) 1D kernel --
     an edge_ladder appended to the c_n grid only (the greedy selection grid stays ladder-free).
 
     Returns a dict of log-spaced abscissae and values:
-      m_list, g   -- g_m^lin at m in m_list (P-greedy sup power on the selection grid)
-      cN, cn      -- c_n at n in cN (cn = upper bracket: B&B certificate on 1D dist_bound kernels,
-                     off-grid estimate otherwise; c_n <= cn)
-      cn_lo       -- lower bracket, a rigorous lower bound (cn_lo <= c_n <= cn)
+      m_list, g    -- numerical g_m^lin estimates at m in m_list (P-greedy grid-sup power)
+      cN, cn       -- c_n indices and upper values: B&B certificates where available,
+                      off-grid estimates otherwise
+      cn_lo        -- rigorous lower bounds (cn_lo <= c_n)
+      cn_certified -- boolean mask; c_n <= cn is guaranteed only where True
       n_used      -- P-greedy centers placed (stops when Pow^2 -> 0)
       d           -- domain dimension.
+
+    `compress_irls=True` uses r_n=min(N,3n+100) dominant Gram coordinates in each IRLS solve.
+    Set `compress_irls=False` to use all N coordinates, matching the manuscript algorithm at a
+    substantially higher computational cost.
     refine_starts/refine_iters control the multistart sup search where it still applies (Legendre,
     d>1); the defaults resolve 1D, but a sparser high-d grid needs more starts (see matern.py, d=3).
     """
@@ -690,8 +813,8 @@ def sampling_vs_gelfand(
     n_used = gr.n_
     gcurve = (
         gr.g_curve().cpu().numpy()
-    )  # g_m over all m (sup power on the selection grid)
-    m_list = log_spaced_ints(n_used - 1, 60)  # report g_m at these m (all are cheap)
+    )  # numerical g_m^lin estimates over all m (candidate-grid maximum)
+    m_list = log_spaced_ints(n_used - 1, 60)  # report g_m^lin estimates at these m
 
     # reliable range n <~ N/5 (beyond it V_p interpolates the grid and the upper bound collapses --
     # see gelfand_widths).  Ladder points don't count: they cluster at the endpoints, adding no
@@ -701,7 +824,7 @@ def sampling_vs_gelfand(
         cap, n_cn
     )  # compute c_n only here (each is an expensive minimax)
     lad = edge_ladder if (gkind == "chebyshev" and d == 1) else 0
-    cn_up, cn_lo = gelfand_widths(
+    cn_up, cn_lo, cn_info = gelfand_widths(
         kernel,
         box_grid(cn_grid, d, dt, "cpu", kind=gkind, domain=gdom, edge_ladder=lad),
         cN,
@@ -710,13 +833,16 @@ def sampling_vs_gelfand(
         exchange=exchange,
         certify_tol=certify_tol,
         certify_evals=certify_evals,
+        return_info=True,
+        compress_irls=compress_irls,
     )
     return dict(
         m_list=m_list,
-        g=gcurve[m_list],
+        g=gcurve[m_list],  # numerical estimate; not the optimized sampling number
         cN=cN,
         cn=cn_up.cpu().numpy(),
         cn_lo=cn_lo.cpu().numpy(),
+        cn_certified=cn_info["upper_certified"],
         n_used=n_used,
         d=d,
     )

@@ -3,11 +3,12 @@ P-greedy center selection for kernel interpolation.
 
 The next center is placed where the power function
     Pow_P(x) = dist_H( K(.,x), span{ K(.,x_i) : x_i in P } )
-is maximal over a fixed candidate grid -- the weak greedy of DeVore-Petrova-Wojtaszczyk
-(arXiv:1204.2290) with gamma=1/2 on the dictionary of kernel translates, realized by the
-exact argmax (which trivially meets the gamma=1/2 rule).  PGreedy maintains the residual
+is maximal over a fixed candidate grid.  This is the strong rule (gamma=1) relative to that
+finite grid.  It satisfies the weak-greedy rule with gamma=1/2 on the full dictionary of kernel
+translates only if the grid resolves the true power-function supremum within a factor of two;
+the computation does not verify that off-grid condition.  PGreedy maintains the residual
 power at EVERY grid point via an incremental Newton basis (Pazouki-Schaback): O(N)/step,
-O(N m^2) total, returning the full curve g_m = sup_x Pow_m(x) over m centers.  Device-
+O(N m^2) total, returning the full numerical sampling-number curve g_m^lin over m centers.  Device-
 agnostic (allocates on the input's device) and dtype-threaded (default float64; float32
 is faster on GPU but its power update p <- p - v_n^2 cancels badly as Pow -> 0).
 """
@@ -93,7 +94,7 @@ class PGreedy:
         return self
 
     def g_curve(self) -> torch.Tensor:
-        """g_m^lin = sup_x Pow_m(x) as a function of the number of centers m.
+        """Numerical sampling numbers g_m^lin as a function of the number of centers m.
 
         Returns tensor of length n_+1; entry m is the value with m centers."""
         return self.pmax_

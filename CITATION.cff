@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: If you use this software, please cite it using the metadata below.
+title: P-greedy sampling errors versus Gelfand widths
+type: software
+authors:
+  - family-names: Neumayer
+    given-names: Sebastian
+repository-code: https://github.com/Zeppo1994/Gelfand-Numbers-and-P-Greedy
+license: MIT
+date-released: 2026-08-05

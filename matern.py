@@ -1,14 +1,15 @@
 """
-Sampling numbers vs Gelfand widths for the MATERN kernel, in d=1 and d=3.
+Supplemental experiment: estimated sampling numbers vs Gelfand-width lower/upper values for the
+MATERN kernel, in d=1 and d=3.  This experiment is not part of the manuscript's numerical section.
 
 The Legendre experiment (legendre.py) repeated for a Matern nu=3/2 RKHS -- a bounded kernel with
 regularly-varying (algebraic) singular numbers, the regime the comparison theorem of
-MAIN_Sampl_vs_Gelfand.tex covers.  For each dimension the two widths g_m^lin and c_n run parallel
-and the ratio g_m/c_n stays BOUNDED (no sqrt(n)), whereas the general KPUU bound only gives
-g_{2n} <= C sqrt(n) c_n.  The theorem has no dimension in its hypotheses, and the bounded ratio
-indeed persists in d=3 (Matern is stationary, so it drops into higher d unchanged).
+the companion manuscript covers.  For each dimension the estimated sampling numbers and c_n run
+parallel, with no observed sqrt(n) growth.  Here g_m^lin is numerically estimated from one P-greedy
+design, giving an upper surrogate rather than the global point-set infimum.  Matern is stationary,
+so the same implementation applies unchanged in d=3.
 
-Two figures: matern.png (the g_m^lin vs c_n comparison, d=1 and d=3) and
+Two figures: matern.png (the estimated g_m^lin vs c_n comparison, d=1 and d=3) and
 matern_points.png (the P-greedy design in d=1: quasi-uniform gap-bisection -- the structure
 behind the staircase g_m curve, contrast the endpoint-clustered Legendre design).
 """
@@ -28,7 +29,7 @@ import widths
 torch.manual_seed(0)
 
 
-def rates_figure():
+def rates_figure(compress_irls=True):
     specs = [
         (
             1,
@@ -38,7 +39,7 @@ def rates_figure():
                 sel_grid=16000,
                 cn_grid=2000,
                 n_cap=300,
-                certify_evals=1_500_000,
+                certify_evals=500_000,
             ),
         ),
         (
@@ -51,23 +52,27 @@ def rates_figure():
                 n_cap=140,
                 refine_iters=100,
                 certify_tol=0.02,
-                certify_evals=1_500_000,
+                certify_evals=500_000,
             ),
         ),
     ]
 
     results = []
     for d, ker, cfg in specs:
-        r = widths.sampling_vs_gelfand(ker, d=d, **cfg)
+        r = widths.sampling_vs_gelfand(ker, d=d, compress_irls=compress_irls, **cfg)
         g_at_cN = np.exp(
             np.interp(np.log(r["cN"]), np.log(r["m_list"]), np.log(r["g"]))
         )
-        r["ratio"] = g_at_cN / r["cn"]  # ratio at the (upper) c_n
+        r["ratio_lo"] = g_at_cN / r["cn"]
+        r["ratio_hi"] = g_at_cN / r["cn_lo"]
+        r["ratio_kind"] = ("certified ratio interval" if r["cn_certified"].all()
+                           else "indicator range")
         results.append((rf"Mat\'ern $\nu=3/2$, $d={d}$", r))
         print(
             f"Matern d={d}:  n_used={r['n_used']:4d}   "
-            f"median g_m/c_n = {np.median(r['ratio']):.2f}  "
-            f"(range {r['ratio'].min():.2f}-{r['ratio'].max():.2f})"
+            f"median estimated g_m/c_n {r['ratio_kind']} = [{np.median(r['ratio_lo']):.2f}, "
+            f"{np.median(r['ratio_hi']):.2f}]  "
+            f"({int(r['cn_certified'].sum())}/{len(r['cN'])} uppers certified)"
         )
 
     fig, axes = plt.subplots(
@@ -82,28 +87,26 @@ def rates_figure():
             "o-",
             ms=3.5,
             color="C0",
-            label=r"$g_m^{\mathrm{lin}}$ (sampling)",
+            label=r"$g_m^{\mathrm{lin}}$ (P-greedy estimate)",
         )
-        ax.fill_between(
+        widths.plot_gelfand_bounds(
+            ax,
             r["cN"],
             r["cn_lo"],
             r["cn"],
+            r["cn_certified"],
             color="C1",
-            alpha=0.3,
-            lw=0,
-            label=r"$c_n\in[c_n^-,c_n^+]$ (Gelfand $d_n$)",
         )
-        ax.loglog(r["cN"], r["cn_lo"], "-", color="C1", lw=0.8)
-        ax.loglog(r["cN"], r["cn"], "-", color="C1", lw=0.8)
         ax.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
         ax.set_ylabel(r"$\|\cdot\|_\infty$ width")
-        ax.set_title(f"{label}\nmedian $g_m/c_n = {np.median(r['ratio']):.2f}$")
+        ax.set_title(f"{label}\nmedian estimated $g_m/c_n$ {r['ratio_kind']} "
+                     f"[{np.median(r['ratio_lo']):.2f}, {np.median(r['ratio_hi']):.2f}]")
         ax.legend(fontsize=8)
         ax.grid(True, which="both", alpha=0.3)
 
     fig.suptitle(
-        r"Mat\'ern $g_m^{\mathrm{lin}}$ vs Gelfand widths $c_n$: the ratio stays "
-        r"bounded (no $\sqrt{n}$) in $d=1$ and $d=3$"
+        r"Mat\'ern estimated sampling numbers vs Gelfand widths: "
+        r"no observed $\sqrt{n}$ growth in $d=1$ and $d=3$"
     )
     fig.tight_layout()
     fig.savefig("matern.png", dpi=130, bbox_inches="tight", pad_inches=0.02)

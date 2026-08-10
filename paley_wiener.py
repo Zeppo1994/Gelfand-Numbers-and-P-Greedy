@@ -1,13 +1,13 @@
 """
-Sampling numbers vs Gelfand widths for the BAND-LIMITED (Paley-Wiener / prolate) kernel, in float64.
+Estimated sampling numbers vs Gelfand-width lower/upper values for the Paley-Wiener kernel, in float64.
 
     K_c(s,t) = sin(c(s-t))/(pi(s-t)),   s,t in [-1,1],   K(x,x) = c/pi,   N_eff = 2c/pi.
 
-The comparison theorem of MAIN_Sampl_vs_Gelfand.tex assumes regularly-varying (algebraic) singular
+The comparison theorem in the companion manuscript assumes regularly-varying (algebraic) singular
 numbers (legendre.py / matern.py).  The band-limited kernel is the opposite regime: its sigma_k are
-the Slepian eigenvalues -- flat ~1 up to N_eff, then a super-exponential cliff.  So g_m^lin and c_n
-are both ~flat and then fall off the SAME cliff at N_eff: below it the sampling numbers track the
-Gelfand-width bracket with a bounded ratio (the theorem's conclusion, on a kernel outside its
+the Slepian eigenvalues -- flat ~1 up to N_eff, then a super-exponential cliff.  The estimated
+sampling numbers g_m^lin and c_n are both ~flat and then fall off the SAME cliff at N_eff: below
+it the curves numerically track one another (on a kernel outside the theorem's
 hypotheses); at n ~ N_eff both hit the float64 cancellation floor tau ~ sqrt(eps)*sqrt(K(x,x)) ~ 1e-6,
 because the band-limited Gram has numerical rank ~ N_eff (past the cliff the recovered values ARE the
 floor, not the true widths).
@@ -17,7 +17,7 @@ precision (mpmath) rerun of the width minimax; the float64 comparison below N_ef
 of interest here (the floored values past the cliff carry no information).
 
 Two figures, three bandwidths N_eff in {20,40,80} (the cliff marches right in proportion to c):
-  paley_wiener.png        -- g_m^lin, the float64 c_n bracket, and sigma_n, each falling off the
+  paley_wiener.png        -- estimated g_m^lin, float64 c_n lower/upper values, and sigma_n, each falling off the
                              N_eff cliff into the float64 floor.
   paley_wiener_points.png -- the P-greedy design: quasi-uniform at Nyquist spacing 2/N_eff up to N_eff.
 """
@@ -36,7 +36,7 @@ import widths
 
 torch.manual_seed(0)
 
-# g_m^lin / c_n config per bandwidth.  The c_n upper bound is the branch-and-bound certificate
+# Estimated g_m^lin / c_n config per bandwidth.  The c_n upper value is a branch-and-bound certificate
 # (sinc has a dist_bound modulus); at/past the N_eff cliff, where the widths ARE the float64
 # floor, the certificate cannot converge and gelfand_widths warns + falls back to the dense-scan
 # estimate there -- expected, the floored values carry no information to certify.
@@ -47,11 +47,11 @@ SPECS = [
 ]
 
 
-def rates_figure():
+def rates_figure(compress_irls=True):
     results = []
     for n_eff, cfg in SPECS:
         ker = PaleyWienerSincKernel(n_eff=n_eff)
-        r = widths.sampling_vs_gelfand(ker, d=1, **cfg)
+        r = widths.sampling_vs_gelfand(ker, d=1, compress_irls=compress_irls, **cfg)
         r["sigma"] = ker.singular_numbers(
             r["n_used"]
         )  # float64 sigma_n (floors past N_eff)
@@ -61,7 +61,8 @@ def rates_figure():
             np.interp(np.log(r["cN"]), np.log(r["m_list"]), np.log(r["g"]))
         )
         r["g_at_cN"] = g_at_cN
-        r["ratio"] = g_at_cN / r["cn"]
+        r["ratio_lo"] = g_at_cN / r["cn"]
+        r["ratio_hi"] = g_at_cN / r["cn_lo"]
 
         # reliability mask: both widths above the band-limited-Gram floor
         tau = 20.0 * np.sqrt(np.finfo(np.float64).eps) * np.sqrt(r["diag"])
@@ -69,10 +70,14 @@ def rates_figure():
         r["rel"], r["tau"] = rel, tau
         results.append((n_eff, r))
 
-        rr = r["ratio"][rel]
+        rr_lo = r["ratio_lo"][rel]
+        rr_hi = r["ratio_hi"][rel]
+        ratio_kind = ("certified ratio interval" if r["cn_certified"][rel].all()
+                      else "numerical indicator range")
         print(
             f"N_eff={n_eff:3d}  reliable n<= {int(r['cN'][rel].max()) if rel.any() else 0:3d}  "
-            f"median g_m/c_n = {np.median(rr):.2f}"
+            f"median estimated g_m/c_n {ratio_kind} = [{np.median(rr_lo):.2f}, {np.median(rr_hi):.2f}]  "
+            f"({int(r['cn_certified'][rel].sum())}/{int(rel.sum())} reliable uppers certified)"
             if rel.any()
             else f"N_eff={n_eff}: no reliable float64 window"
         )
@@ -90,19 +95,16 @@ def rates_figure():
             "o-",
             ms=3.5,
             color="C0",
-            label=r"$g_m^{\mathrm{lin}}$ (P-greedy sampling)",
+            label=r"$g_m^{\mathrm{lin}}$ (P-greedy estimate)",
         )
-        ax.fill_between(
+        widths.plot_gelfand_bounds(
+            ax,
             r["cN"],
             r["cn_lo"],
             r["cn"],
+            r["cn_certified"],
             color="C1",
-            alpha=0.35,
-            lw=0,
-            label=r"$c_n\in[c_n^-,c_n^+]$ (Gelfand width)",
         )
-        ax.loglog(r["cN"], r["cn_lo"], "-", color="C1", lw=0.8)
-        ax.loglog(r["cN"], r["cn"], "-", color="C1", lw=0.8)
         ax.loglog(
             np.arange(1, len(r["sigma"])),
             r["sigma"][1:],
@@ -143,8 +145,8 @@ def rates_figure():
         ax.grid(True, which="both", alpha=0.3)
 
     fig.suptitle(
-        r"Band-limited (Paley-Wiener) kernel: sampling numbers $g_m^{\mathrm{lin}}$ and Gelfand "
-        r"widths $c_n$ fall off the same Slepian cliff at $N_{\mathrm{eff}}=2c/\pi$, into the float64 floor",
+        r"Band-limited kernel: estimated sampling numbers and Gelfand lower/upper values "
+        r"fall off the Slepian cliff at $N_{\mathrm{eff}}=2c/\pi$, into the float64 floor",
         fontsize=12,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])

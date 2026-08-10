@@ -3,18 +3,22 @@ Periodic mixed-smoothness Sobolev RKHS  H^m_mix([0,1]^d)  (Berlinet-Thomas-Agnan
 p.318, tensorized): the d-fold tensor of  k_1(s,t)=1+(-1)^{m-1}/(2m)! B_{2m}(|s-t|).
 For moderate d and smoothness m = 1, 2, 3, two figures:
 
-  periodic_mixed.png -- P-greedy sampling error g_n = sup_x Pow_n(x) (worst-case
-      L_inf recovery from n nodes) vs n on log-log axes, against the Gelfand-width
+  periodic_mixed.png -- sampling numbers g_n^lin, numerically estimated by one P-greedy design
+      (a constructive upper surrogate), vs n on log-log axes, against the Gelfand-width
       benchmark rate c_n ~ n^{-(m-1/2)} (log n)^{(d-1)m}.  Its constant is fitted by a
       single least-squares offset over the asymptotic tail (no per-point tuning); the
       empirical slope is printed next to the predicted -(m-1/2).
   periodic_mixed_points.png -- for d=2, the raw points the greedy places in [0,1]^2.
 
-Notation: sampling numbers are g_n^lin (n = #nodes), not g_m^lin as in legendre.py /
-matern.py, since here m is the mixed SMOOTHNESS of H^m_mix; same quantity, n plays
-m's role.  c_n is the Gelfand width as everywhere.
+Notation: g_n^lin is the sampling-number estimate (n = #nodes), while m is the mixed
+SMOOTHNESS of H^m_mix.  The estimate is an upper surrogate, not a computation of the exact
+point-set infimum; c_n is the Gelfand width as everywhere.
 
 Run:  python periodic_mixed.py
+Precision: all Gelfand-width computations and the m>=2 P-greedy curves use float64.  The
+m=1 P-greedy curve uses float32: it stays safely above that dtype's cancellation floor and
+was validated against float64 to <0.6%, while providing about a 16x GPU speedup.
+
 """
 
 from __future__ import annotations
@@ -78,22 +82,22 @@ def fit_const(ns, y, m, d):
 
 
 # --------------------------------------------------------------------------- #
-#  (1)+(2)  P-greedy sampling numbers g_n vs the NUMERICAL Gelfand widths c_n
+#  (1)+(2)  Estimated sampling numbers g_n^lin vs the NUMERICAL Gelfand widths c_n
 #
 #  The theoretical rate n^{-(m-1/2)}(log n)^{(d-1)m} is only asymptotic: at reachable n
 #  its (log n)^{(d-1)m} factor is far from developed (peaks near n = e^{(d-1)m/(m-1/2)}),
 #  so a line fitted to a finite window bends away from the data in higher d.  The honest,
-#  dimension-robust comparison is g_n against the actual Gelfand width c_n (from
-#  widths.gelfand_widths): their RATIO stays bounded (the paper's theorem), no sqrt(n) and
-#  no dimension blow-up.  The rate line is kept as a light guide, fitted to c_n.
+#  dimension-robust numerical comparison is the sampling-number estimate against the Gelfand-width
+#  lower/upper band from widths.gelfand_widths.  The rate line is kept as a light guide, fitted to the
+#  numerical upper width value.
 # --------------------------------------------------------------------------- #
-def rates_figure():
+def rates_figure(compress_irls=True, diagnostic_overlays=False):
     # per case: (d, {m: greedy nodes}, greedy grid, c_n grid, max n for c_n).
     # Greedy budgets (GPU): m=1 (float32, cheap, floor-free) runs furthest on a fine grid;
     # m=2 (float64) is bandwidth-limited but reaches several thousand; m=3 is float64-floor-
     # limited near n~600.  c_n stays on CPU (its small fp64 eighs + refine beat GPU),
     # extended as far as the O(N^3) eigh affords, with cn_grid ~ 5*n_cap for the n<~N/5
-    # bracket reliability.
+    # lower/upper reliability.
     cases = [
         (2, {1: 12000, 2: 5000, 3: 1000}, 120000, 4500, 900),
         (3, {1: 10000, 2: 4000}, 80000, 4500, 900),
@@ -119,7 +123,7 @@ def rates_figure():
             above = g > 2e-6
             n_rel = int(gn[above][-1]) if above.any() else n_used - 1
             ns_c = widths.log_spaced_ints(min(n_cap, n_used - 1, n_rel), 14)
-            cn_up, cn_lo = widths.gelfand_widths(
+            cn_up, cn_lo, cn_info = widths.gelfand_widths(
                 PeriodicSobolevMixedKernel(m=m, d=d, dtype=torch.float64, device="cpu"),
                 Xc,
                 ns_c,
@@ -127,10 +131,16 @@ def rates_figure():
                 refine=True,
                 refine_starts=32,
                 refine_iters=40,
+                return_info=True,
+                compress_irls=compress_irls,
             )
             cn_up, cn_lo = cn_up.numpy(), cn_lo.numpy()
             g_at_c = np.interp(ns_c, gn, g)  # g_n sampled at the c_n abscissae
-            ratio = g_at_c / cn_up  # upper c_n -> smaller (conservative) ratio
+            certified = cn_info["upper_certified"]
+            ratio_kind = ("certified ratio interval" if certified.all()
+                          else "numerical indicator range")
+            ratio_lo = g_at_c / cn_up
+            ratio_hi = g_at_c / cn_lo
             col = colors[m]
 
             # asymptotic guide: the rate only makes sense past the hump of its log factor
@@ -146,8 +156,9 @@ def rates_figure():
             )
             n_line = np.geomspace(max(n_start, 2.0), gn[-1], 60)
 
-            # exact c_n by the orbit formula (see gelfand_tails) -- a proof-grade reference
-            # the numerical bracket must contain.
+            # Spectral tail from the orbit formula (see gelfand_tails): a rigorous lower
+            # reference at every n and exact when n closes a complete Fourier shell.  At a
+            # mid-shell index, a real invariant subspace cannot retain only part of a multiplet.
             ex = np.sqrt(
                 np.clip(
                     PeriodicSobolevMixedKernel(m=m, d=d).gelfand_tails(int(ns_c[-1])),
@@ -156,42 +167,39 @@ def rates_figure():
                 )
             )
             print(
-                f"      exact orbit c_n check: max |c_n^-/exact - 1| = "
+                f"      orbit-tail check: max |c_n^-/tail - 1| = "
                 f"{np.abs(cn_lo / ex[ns_c] - 1).max():.1e}, "
-                f"max c_n^+/exact = {np.max(cn_up / ex[ns_c]):.3f}"
+                f"max c_n^+/tail = {np.max(cn_up / ex[ns_c]):.3f}"
             )
 
-            # --- top: g_n, numerical c_n bracket (band + edges), asymptotic guide ---
+            # --- top: estimated sampling numbers, numerical c_n lower/upper band, asymptotic guide ---
             top.loglog(
                 gn[2:],
                 g[2:],
                 "-",
                 color=col,
                 lw=1.6,
-                label=rf"$g_n^{{\mathrm{{lin}}}}$ (sampling), $m={m}$",
+                label=rf"$g_n^{{\mathrm{{lin}}}}$ (P-greedy estimate), $m={m}$",
             )
-            top.loglog(
-                np.arange(1, len(ex)),
-                ex[1:],
-                "--",
-                color="k",
-                lw=0.9,
-                alpha=0.55,
-                label="exact $c_n$ (orbit formula)" if m == min(m_nodes) else None,
-            )
-            top.fill_between(
+            if diagnostic_overlays:
+                top.loglog(
+                    np.arange(1, len(ex)),
+                    ex[1:],
+                    "--",
+                    color="k",
+                    lw=0.9,
+                    alpha=0.55,
+                    label="orbit spectral tail (exact at closed shells)" if m == min(m_nodes) else None,
+                )
+            widths.plot_gelfand_bounds(
+                top,
                 ns_c,
                 cn_lo,
                 cn_up,
+                certified,
                 color=col,
-                alpha=0.3,
-                lw=0,
-                label=rf"$c_n\in[c_n^-,c_n^+]$ (Gelfand), $m={m}$",
+                series_label=rf"$m={m}$",
             )
-            top.loglog(ns_c, cn_lo, "-", color=col, lw=0.8)  # bracket edges (visible
-            top.loglog(
-                ns_c, cn_up, "-", color=col, lw=0.8
-            )  # when the bracket is tight)
             top.loglog(
                 n_line,
                 C * bench_rate(n_line, m, d),
@@ -202,23 +210,22 @@ def rates_figure():
             )
 
             print(
-                f"  m={m}: n_used={n_used:4d}  g_n/c_n median={np.median(ratio):.2f} "
-                f"(range {ratio.min():.2f}-{ratio.max():.2f})"
+                f"  m={m}: n_used={n_used:4d}  median estimated g_n/c_n {ratio_kind}="
+                f"[{np.median(ratio_lo):.2f}, {np.median(ratio_hi):.2f}]  "
+                f"({int(certified.sum())}/{len(certified)} uppers certified)"
             )
 
         top.set_xlabel(r"$n$  (sample nodes / width index)")
         top.set_ylabel(r"$L_\infty$ width")
         top.set_title(
-            rf"$H^m_{{\mathrm{{mix}}}}([0,1]^{d})$: sampling $g_n$ vs "
-            rf"Gelfand $c_n$"
+            rf"$H^m_{{\mathrm{{mix}}}}([0,1]^{d})$: estimated sampling $g_n^{{lin}}$ vs "
+            rf"Gelfand lower/upper values"
         )
         top.legend(fontsize=7.5)
         top.grid(True, which="both", alpha=0.3)
 
     fig.suptitle(
-        r"Periodic mixed Sobolev $H^m_{\mathrm{mix}}([0,1]^d)$: P-greedy "
-        r"sampling numbers track the numerical Gelfand widths with a bounded "
-        r"ratio, in every dimension"
+        r"Periodic mixed Sobolev: estimated sampling numbers and Gelfand lower/upper values"
     )
     fig.tight_layout()
     fig.savefig("periodic_mixed.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
