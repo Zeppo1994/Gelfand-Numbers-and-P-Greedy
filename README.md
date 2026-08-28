@@ -49,6 +49,8 @@ python paley_wiener.py
 
 The Matérn experiment is supplemental. Legendre and Matérn use `[-1,1]^d`, the
 periodic experiment uses `[0,1]^d`, and Paley–Wiener uses `[-1,1]`.
+Both Legendre figures use Mercer truncation `M=24,000` and a 20,000-point
+Chebyshev candidate grid.
 
 ## Publication run
 
@@ -58,8 +60,8 @@ Run the manuscript figures sequentially in the foreground:
 python run_manuscript_figures.py --output-dir runs/manuscript
 ```
 
-The runner writes figures, numerical arrays, `run.log`, and `status.json` to the output
-directory. Resume completed or interrupted stages with:
+The runner writes PNGs to `<output-dir>/figures/` and keeps numerical arrays,
+`run.log`, and `status.json` in the output directory. Resume completed or interrupted stages with:
 
 ```bash
 python run_manuscript_figures.py --output-dir runs/manuscript --resume
@@ -92,8 +94,8 @@ legendre.comparison_figure(compress_irls=False)
 ```
 
 Certified upper values use a branch-and-bound residual supremum when the kernel
-provides a rigorous cell modulus. Legendre uses a numerical supremum estimate, as do periodic kernels in
-dimension greater than one. The periodic spectral tail is exact at
+provides a rigorous cell modulus. Legendre uses a numerical supremum estimate, as do
+periodic kernels in dimension greater than one. The periodic spectral tail is exact at
 closed Fourier shells and provides an independent reference.
 
 ## Numerical caveats

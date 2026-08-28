@@ -17,7 +17,7 @@ The s=3 Gelfand upper estimate reaches the float64 feature-residual cancellation
 
 Running this module produces the two-panel comparison figure ``figures/legendre.png`` and
 the joint two-panel design figure ``figures/legendre_points.png`` for s=2 and s=3.
-The sampling estimate uses the established 20000-point Chebyshev grid.  s=2 keeps Pow^2 above the
+Both figures use the 20,000-point Chebyshev grid and Mercer truncation M=24,000.  s=2 keeps Pow^2 above the
 float64 cancellation floor out to large m; smoother kernels stop earlier as Pow^2 -> 0 hits tol_p.
 """
 
@@ -36,6 +36,11 @@ import widths
 
 torch.manual_seed(0)
 
+SMOOTHNESS_VALUES = (2.0, 3.0)
+MERCER_TRUNCATION = 24_000
+CANDIDATE_GRID_SIZE = 20_000
+ENDPOINT_LADDER_SIZE = 480
+POINT_DESIGN_SIZE = 64
 
 # Publication run: M=24000 keeps the omitted endpoint-energy scale below the smallest
 # widths tracked near n=1000.  This Mercer truncation is specific to the Legendre feature
@@ -44,12 +49,12 @@ torch.manual_seed(0)
 def _rates_panel(
     ax,
     s=2.0,
-    n_trunc=24000,
+    n_trunc=MERCER_TRUNCATION,
     max_iter=1000,
-    sel_grid=20000,
+    sel_grid=CANDIDATE_GRID_SIZE,
     cn_grid=5000,
     n_cap=1000,
-    edge_ladder=480,
+    edge_ladder=ENDPOINT_LADDER_SIZE,
     compress_irls=True,
 ):
     """Draw one Legendre sampling-vs-Gelfand panel on ``ax``."""
@@ -101,13 +106,13 @@ def _rates_panel(
 
 
 def comparison_figure(
-    smoothness_values=(2.0, 3.0),
-    n_trunc=24000,
+    smoothness_values=SMOOTHNESS_VALUES,
+    n_trunc=MERCER_TRUNCATION,
     max_iter=1000,
-    sel_grid=20000,
+    sel_grid=CANDIDATE_GRID_SIZE,
     cn_grid=5000,
     n_cap=1000,
-    edge_ladder=480,
+    edge_ladder=ENDPOINT_LADDER_SIZE,
     compress_irls=True,
     out="figures/legendre.png",
 ):
@@ -156,10 +161,10 @@ def comparison_figure(
 
 
 def points_figure(
-    smoothness_values=(2.0, 3.0),
-    m=64,
-    grid=4000,
-    n_trunc=4000,
+    smoothness_values=SMOOTHNESS_VALUES,
+    m=POINT_DESIGN_SIZE,
+    grid=CANDIDATE_GRID_SIZE,
+    n_trunc=MERCER_TRUNCATION,
     out="figures/legendre_points.png",
 ):
     """Compare Legendre P-greedy designs across smoothness values at one size."""

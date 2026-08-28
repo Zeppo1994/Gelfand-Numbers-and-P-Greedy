@@ -24,11 +24,18 @@ import periodic_mixed
 
 COMPRESS_IRLS = False
 LEGENDRE_OPTIONS = {
-    "smoothness_values": (2.0, 3.0),
-    "sel_grid": 20_000,
-    "edge_ladder": 480,
+    "smoothness_values": legendre.SMOOTHNESS_VALUES,
+    "n_trunc": legendre.MERCER_TRUNCATION,
+    "sel_grid": legendre.CANDIDATE_GRID_SIZE,
+    "edge_ladder": legendre.ENDPOINT_LADDER_SIZE,
 }
-POINT_DESIGN_OPTIONS = {"smoothness_values": (2.0, 3.0), "m": 64}
+POINT_DESIGN_OPTIONS = {
+    "smoothness_values": legendre.SMOOTHNESS_VALUES,
+    "m": legendre.POINT_DESIGN_SIZE,
+    "grid": legendre.CANDIDATE_GRID_SIZE,
+    "n_trunc": legendre.MERCER_TRUNCATION,
+}
+
 
 STAGES = (
     {
