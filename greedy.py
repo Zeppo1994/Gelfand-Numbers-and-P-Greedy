@@ -14,13 +14,7 @@ is faster on GPU but its power update p <- p - v_n^2 cancels badly as Pow -> 0).
 """
 
 from __future__ import annotations
-import numpy as np
 import torch
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 
 class PGreedy:
     """Strong P-greedy: exact argmax of the residual power over the grid."""
@@ -113,75 +107,3 @@ def power_function(kernel, P: torch.Tensor, Xq: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(
         torch.clamp(kernel.diagonal(Xq) - torch.sum(Kqp * sol.T, dim=1), min=0.0)
     )
-
-
-def design_figure(
-    kernel,
-    fit_grid: torch.Tensor,
-    label: str,
-    design_note: str,
-    out: str,
-    m_snap: int = 12,
-    n_design: int = 128,
-):
-    """Two-panel P-greedy visualization shared by the 1-D kernel drivers:
-      top    -- Pow_m(x) after m_snap centers + the next chosen point (argmax = the greedy rule),
-      bottom -- the whole design (center position vs selection order), exposing the kernel's
-                geometry (endpoint-clustered vs quasi-uniform, per `design_note`).
-    `fit_grid` is passed in (its measure is kernel-specific; keeps greedy.py free of widths).
-    """
-    xq = torch.linspace(-1, 1, 4000, dtype=kernel.dtype).reshape(-1, 1)
-    gr = PGreedy(kernel, max_iter=n_design, dtype=kernel.dtype).fit(fit_grid)
-    ctrs = gr.ctrs_.reshape(-1).cpu().numpy()
-
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 8.0))
-    P = gr.ctrs_[:m_snap]
-    pw = power_function(kernel, P, xq).cpu().numpy()
-    next_x = ctrs[m_snap]
-    next_p = float(power_function(kernel, P, gr.ctrs_[m_snap : m_snap + 1])[0])
-    ax = axes[0]
-    ax.plot(
-        xq.reshape(-1).cpu().numpy(),
-        pw,
-        color="C0",
-        lw=1.6,
-        label=rf"$\mathrm{{Pow}}_{{{m_snap}}}(x)$",
-    )
-    ax.plot(
-        ctrs[:m_snap],
-        np.zeros(m_snap),
-        "|",
-        color="0.35",
-        ms=14,
-        mew=1.5,
-        label=f"{m_snap} chosen centers",
-    )
-    ax.plot(
-        [next_x],
-        [next_p],
-        "*",
-        color="C3",
-        ms=16,
-        label=r"next chosen point $=\arg\max\,\mathrm{Pow}$",
-    )
-    ax.axvline(next_x, color="C3", lw=0.8, ls=":")
-    ax.set_xlabel(r"$x \in [-1,1]$")
-    ax.set_ylabel(r"power function $\mathrm{Pow}_m(x)$")
-    ax.set_title(rf"{label}: the greedy rule (argmax of $\mathrm{{Pow}}_{{{m_snap}}}$)")
-    ax.set_ylim(0, 1.32 * max(float(pw.max()), next_p))
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
-    ax = axes[1]
-    order = np.arange(1, len(ctrs) + 1)
-    ax.scatter(ctrs, order, c=order, cmap="viridis", s=14)
-    ax.set_xlabel(r"center position $x$")
-    ax.set_ylabel(r"selection order $n$")
-    ax.set_title(rf"{label}: greedy design ({design_note})")
-    ax.set_xlim(-1.03, 1.03)
-    ax.grid(True, alpha=0.3)
-    fig.suptitle(
-        "P-greedy point selection: each chosen point is the argmax of the power function"
-    )
-    fig.tight_layout()
-    fig.savefig(out, dpi=130, bbox_inches="tight", pad_inches=0.02)
-    print(f"  figure saved -> {out}")

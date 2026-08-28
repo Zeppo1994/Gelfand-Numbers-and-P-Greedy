@@ -3,12 +3,11 @@ Periodic mixed-smoothness Sobolev RKHS  H^m_mix([0,1]^d)  (Berlinet-Thomas-Agnan
 p.318, tensorized): the d-fold tensor of  k_1(s,t)=1+(-1)^{m-1}/(2m)! B_{2m}(|s-t|).
 For moderate d and smoothness m = 1, 2, 3, two figures:
 
-  periodic_mixed.png -- sampling numbers g_n^lin, numerically estimated by one P-greedy design
+  figures/periodic_mixed.png -- sampling numbers g_n^lin, numerically estimated by one P-greedy design
       (a constructive upper surrogate), vs n on log-log axes, against the Gelfand-width
       benchmark rate c_n ~ n^{-(m-1/2)} (log n)^{(d-1)m}.  Its constant is fitted by a
-      single least-squares offset over the asymptotic tail (no per-point tuning); the
-      empirical slope is printed next to the predicted -(m-1/2).
-  periodic_mixed_points.png -- for d=2, the raw points the greedy places in [0,1]^2.
+      single least-squares offset over the asymptotic tail.
+  figures/periodic_mixed_points.png -- for d=2, the raw points the greedy places in [0,1]^2.
 
 Notation: g_n^lin is the sampling-number estimate (n = #nodes), while m is the mixed
 SMOOTHNESS of H^m_mix.  The estimate is an upper surrogate, not a computation of the exact
@@ -22,6 +21,7 @@ was validated against float64 to <0.6%, while providing about a 16x GPU speedup.
 """
 
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib
@@ -34,6 +34,7 @@ from greedy import PGreedy
 import widths
 
 torch.manual_seed(0)
+FIGURES_DIR = Path("figures")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -91,7 +92,7 @@ def fit_const(ns, y, m, d):
 #  lower/upper band from widths.gelfand_widths.  The rate line is kept as a light guide, fitted to the
 #  numerical upper width value.
 # --------------------------------------------------------------------------- #
-def rates_figure(compress_irls=True, diagnostic_overlays=False):
+def rates_figure(compress_irls=True):
     # per case: (d, {m: greedy nodes}, greedy grid, c_n grid, max n for c_n).
     # Greedy budgets (GPU): m=1 (float32, cheap, floor-free) runs furthest on a fine grid;
     # m=2 (float64) is bandwidth-limited but reaches several thousand; m=3 is float64-floor-
@@ -181,16 +182,6 @@ def rates_figure(compress_irls=True, diagnostic_overlays=False):
                 lw=1.6,
                 label=rf"$g_n^{{\mathrm{{lin}}}}$ (P-greedy estimate), $m={m}$",
             )
-            if diagnostic_overlays:
-                top.loglog(
-                    np.arange(1, len(ex)),
-                    ex[1:],
-                    "--",
-                    color="k",
-                    lw=0.9,
-                    alpha=0.55,
-                    label="orbit spectral tail (exact at closed shells)" if m == min(m_nodes) else None,
-                )
             widths.plot_gelfand_bounds(
                 top,
                 ns_c,
@@ -228,8 +219,9 @@ def rates_figure(compress_irls=True, diagnostic_overlays=False):
         r"Periodic mixed Sobolev: estimated sampling numbers and Gelfand lower/upper values"
     )
     fig.tight_layout()
-    fig.savefig("periodic_mixed.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
-    print("\nfigure saved -> periodic_mixed.png")
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(FIGURES_DIR / "periodic_mixed.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
+    print("\nfigure saved -> figures/periodic_mixed.png")
 
 
 # --------------------------------------------------------------------------- #
@@ -253,10 +245,14 @@ def points_figure(m: int = 2, counts=(64, 256, 576), sel_grid: int = 24000):
         rf"(periodic mixed Sobolev, $m={m}$)"
     )
     fig.tight_layout()
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        "periodic_mixed_points.png", dpi=130, bbox_inches="tight", pad_inches=0.02
+        FIGURES_DIR / "periodic_mixed_points.png",
+        dpi=130,
+        bbox_inches="tight",
+        pad_inches=0.02,
     )
-    print("figure saved -> periodic_mixed_points.png")
+    print("figure saved -> figures/periodic_mixed_points.png")
 
 
 if __name__ == "__main__":

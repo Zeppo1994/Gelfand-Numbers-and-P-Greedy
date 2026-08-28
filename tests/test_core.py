@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-import inspect
 import pytest
 import torch
 import matplotlib.pyplot as plt
 
-from legendre import rates_figure as legendre_rates_figure
-from periodic_mixed import rates_figure as periodic_rates_figure
+from legendre import comparison_figure as legendre_comparison_figure
+from legendre import points_figure as legendre_points_figure
 from greedy import PGreedy, power_function
 from kernels import (
     LegendreMercerKernel,
@@ -16,15 +15,6 @@ from kernels import (
     PeriodicSobolevMixedKernel,
 )
 from widths import gelfand_widths, plot_gelfand_bounds, sampling_vs_gelfand
-
-@pytest.mark.parametrize("rates_figure", [legendre_rates_figure, periodic_rates_figure])
-def test_diagnostic_overlays_are_opt_in(rates_figure):
-    parameter = inspect.signature(rates_figure).parameters["diagnostic_overlays"]
-    assert parameter.default is False
-
-
-
-
 
 @pytest.mark.parametrize(
     ("kernel", "domain", "dimension"),
@@ -135,6 +125,38 @@ def test_sampling_result_exposes_estimate_and_certification():
     assert result["cn_certified"].dtype == np.bool_
     assert result["cn_certified"].shape == result["cn"].shape
     assert np.all(result["cn_lo"] <= result["cn"] + 1e-12)
+
+
+def test_legendre_comparison_figure_contains_both_smoothness_panels(tmp_path):
+    output = tmp_path / "legendre.png"
+    result = legendre_comparison_figure(
+        n_trunc=64,
+        max_iter=8,
+        sel_grid=32,
+        cn_grid=25,
+        n_cap=4,
+        out=output,
+    )
+
+    assert output.exists()
+    for tag in ("s2", "s3"):
+        assert result[f"{tag}_g"].shape == result[f"{tag}_m_list"].shape
+        assert result[f"{tag}_n_used"] == 8
+
+
+def test_legendre_points_figure_uses_two_smoothness_panels(tmp_path):
+    output = tmp_path / "legendre_points.png"
+    designs = legendre_points_figure(
+        m=8,
+        grid=64,
+        n_trunc=64,
+        out=output,
+    )
+
+    assert output.exists()
+    assert set(designs) == {"s2", "s3"}
+    for design in designs.values():
+        assert design.n_ >= 8
 
 
 def test_gelfand_plot_distinguishes_certified_and_estimated_upper_values():

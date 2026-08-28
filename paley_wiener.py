@@ -17,12 +17,13 @@ precision (mpmath) rerun of the width minimax; the float64 comparison below N_ef
 of interest here (the floored values past the cliff carry no information).
 
 Two figures, three bandwidths N_eff in {20,40,80} (the cliff marches right in proportion to c):
-  paley_wiener.png        -- estimated g_m^lin, float64 c_n lower/upper values, and sigma_n, each falling off the
+  figures/paley_wiener.png        -- estimated g_m^lin, float64 c_n lower/upper values, and sigma_n, each falling off the
                              N_eff cliff into the float64 floor.
-  paley_wiener_points.png -- the P-greedy design: quasi-uniform at Nyquist spacing 2/N_eff up to N_eff.
+  figures/paley_wiener_points.png -- the P-greedy design: quasi-uniform at Nyquist spacing 2/N_eff up to N_eff.
 """
 
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib
@@ -35,6 +36,7 @@ from greedy import PGreedy
 import widths
 
 torch.manual_seed(0)
+FIGURES_DIR = Path("figures")
 
 # Estimated g_m^lin / c_n config per bandwidth.  The c_n upper value is a branch-and-bound certificate
 # (sinc has a dist_bound modulus); at/past the N_eff cliff, where the widths ARE the float64
@@ -150,14 +152,15 @@ def rates_figure(compress_irls=True):
         fontsize=12,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig("paley_wiener.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
-    print("figure saved -> paley_wiener.png")
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig.savefig(FIGURES_DIR / "paley_wiener.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
+    print("figure saved -> figures/paley_wiener.png")
 
 
 # ---------------------------------------------------------------------------------------------
 # P-greedy point selection: the band-limited design is quasi-uniform at the Nyquist spacing
 # 2/N_eff; the n=N_eff line is the saturated threshold design.  Candidate measure is UNIFORM
-# (stationary kernel: no endpoint preference).  (Distinct 3-bandwidth layout, so not design_figure.)
+# (stationary kernel: no endpoint preference).
 # ---------------------------------------------------------------------------------------------
 def points_figure(grid=6000):
     n_effs = [20, 40, 80]
@@ -192,9 +195,10 @@ def points_figure(grid=6000):
         ax.plot(
             thr,
             np.full_like(thr, n_thr),
-            "o",
+            "|",
             color="C3",
-            ms=5,
+            ms=9,
+            mew=1.4,
             zorder=4,
             label=rf"threshold design at $n=N_{{\mathrm{{eff}}}}={n_eff}$",
         )
@@ -216,10 +220,14 @@ def points_figure(grid=6000):
         r"line holds every point found up to the threshold"
     )
     fig.tight_layout()
+    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(
-        "paley_wiener_points.png", dpi=130, bbox_inches="tight", pad_inches=0.02
+        FIGURES_DIR / "paley_wiener_points.png",
+        dpi=130,
+        bbox_inches="tight",
+        pad_inches=0.02,
     )
-    print("figure saved -> paley_wiener_points.png")
+    print("figure saved -> figures/paley_wiener_points.png")
 
 
 if __name__ == "__main__":

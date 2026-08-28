@@ -10,7 +10,6 @@ from pathlib import Path
 import platform
 import socket
 import subprocess
-import sys
 import traceback
 
 import numpy as np
@@ -18,39 +17,51 @@ import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 import legendre
 import paley_wiener
 import periodic_mixed
 
+COMPRESS_IRLS = False
+LEGENDRE_OPTIONS = {
+    "smoothness_values": (2.0, 3.0),
+    "sel_grid": 20_000,
+    "edge_ladder": 480,
+}
+POINT_DESIGN_OPTIONS = {"smoothness_values": (2.0, 3.0), "m": 64}
 
 STAGES = (
     {
+        "name": "legendre_points",
+        "output": "figures/legendre_points.png",
+        "run": lambda: legendre.points_figure(**POINT_DESIGN_OPTIONS),
+    },
+    {
         "name": "legendre",
-        "output": "legendre.png",
-        "run": lambda: legendre.rates_figure(
-            compress_irls=False,
-            diagnostic_overlays=False,
+        "output": "figures/legendre.png",
+        "run": lambda: legendre.comparison_figure(
+            compress_irls=COMPRESS_IRLS,
+            **LEGENDRE_OPTIONS,
         ),
     },
     {
         "name": "periodic_mixed",
-        "output": "periodic_mixed.png",
-        "run": lambda: periodic_mixed.rates_figure(
-            compress_irls=False,
-            diagnostic_overlays=False,
-        ),
+        "output": "figures/periodic_mixed.png",
+        "run": lambda: periodic_mixed.rates_figure(compress_irls=COMPRESS_IRLS),
     },
     {
         "name": "paley_wiener",
-        "output": "paley_wiener.png",
-        "run": lambda: paley_wiener.rates_figure(
-            compress_irls=False,
-        ),
+        "output": "figures/paley_wiener.png",
+        "run": lambda: paley_wiener.rates_figure(compress_irls=COMPRESS_IRLS),
     },
 )
+
+PUBLICATION_SETTINGS = {
+    "compress_irls": COMPRESS_IRLS,
+    "stages": [stage["name"] for stage in STAGES],
+    "legendre": LEGENDRE_OPTIONS,
+    "point_design": POINT_DESIGN_OPTIONS,
+}
 
 
 def utc_now() -> str:
@@ -99,11 +110,7 @@ def initial_status(output_dir: Path) -> dict:
         "git_commit": git_value("rev-parse", "HEAD"),
         "git_status": git_value("status", "--short"),
         "output_dir": str(output_dir),
-        "settings": {
-            "compress_irls": False,
-            "diagnostic_overlays": False,
-            "stages": [stage["name"] for stage in STAGES],
-        },
+        "settings": PUBLICATION_SETTINGS,
         "outputs": {},
     }
 
@@ -145,10 +152,8 @@ def main() -> int:
     output_dir = args.output_dir.expanduser().resolve()
     plan = {
         "output_dir": str(output_dir),
-        "environment": "PyTorch",
-        "stages": [stage["name"] for stage in STAGES],
-        "compress_irls": False,
-        "diagnostic_overlays": False,
+        "environment": os.environ.get("CONDA_DEFAULT_ENV"),
+        **PUBLICATION_SETTINGS,
     }
     if args.dry_run:
         print(json.dumps(plan, indent=2))
@@ -166,11 +171,7 @@ def main() -> int:
             pid=os.getpid(),
             finished_at=None,
         )
-        status["settings"] = {
-            "compress_irls": False,
-            "diagnostic_overlays": False,
-            "stages": [stage["name"] for stage in STAGES],
-        }
+        status["settings"] = PUBLICATION_SETTINGS
     elif status_path.exists():
         raise RuntimeError(f"{status_path} already exists; pass --resume to continue it")
     else:
@@ -206,7 +207,7 @@ def main() -> int:
             status["current_stage"] = None
             write_status(status_path, status)
             print(f"[{utc_now()}] completed stage: {name}", flush=True)
-        except BaseException as exc:
+        except Exception as exc:
             status["state"] = "failed"
             status["failed_stage"] = name
             status["error"] = f"{type(exc).__name__}: {exc}"

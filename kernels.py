@@ -87,7 +87,6 @@ class LegendreMercerKernel:
     ):
         self.s = float(s)
         self.n_trunc = int(n_trunc)
-        self.device = device
         self.dtype = dtype
         k = torch.arange(self.n_trunc, dtype=dtype, device=device)
         t = self.s * torch.log(
@@ -155,7 +154,6 @@ class MaternKernel:
         self.ell = float(ell)
         self.a = math.sqrt(2.0 * self.nu) / self.ell  # inverse correlation length
         self.dtype = dtype
-        self.device = device
 
     def _corr(self, r: torch.Tensor) -> torch.Tensor:
         """Matern correlation as a function of distance r (=1 at r=0, no cusp for the
@@ -265,7 +263,6 @@ class PeriodicSobolevMixedKernel:
         self.m = int(m)
         self.d = int(d)  # reference dimension (for the theoretical rate); eval infers d
         self.dtype = dtype
-        self.device = device
         N = 2 * self.m
         B = bernoulli(N)  # Bernoulli numbers B_0..B_{2m} (B_1 = -1/2)
         # B_{2m}(x) = sum_{j=0}^{2m} C(2m,j) B_j x^{2m-j}; store descending powers.
@@ -438,7 +435,6 @@ class PaleyWienerSincKernel:
         self.n_eff = 2.0 * self.c / math.pi  # Shannon number = time-bandwidth product
         self.diag_val = self.c / math.pi  # K(x,x), constant (stationary)
         self.dtype = dtype
-        self.device = device
 
     def _kfun(self, u: torch.Tensor) -> torch.Tensor:
         """(c/pi) sinc(c u / pi) = sin(c u)/(pi u); torch.sinc gives the c/pi limit at u=0."""

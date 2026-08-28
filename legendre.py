@@ -6,19 +6,23 @@ Plots, in the paper's notation:
   * g_m^lin       sampling numbers, numerically estimated by the grid-resolved power function of
                   the computed P-greedy design (an upper surrogate, not the exact infimum).
   * c_n           Gelfand widths d_n(K)_H, the numerical Kolmogorov width of the translates.
-  * optional diagnostics: sqrt(n) c_n, sigma_n = sqrt(mu_n), and the n^-s rate guide
-    (`diagnostic_overlays=True`).  The manuscript n^-(s-1/2) guide is always shown.
+  * the manuscript rate guide n^-(s-1/2).
 
 Result: the estimated sampling numbers and c_n run parallel on n^-(s-1/2), with no observed sqrt(n)
 growth; this is numerical evidence for the comparison theorem, not an exact computation of g_m^lin.
+Small late-index oscillations in the scaled sampling curve are finite-m effects; for s=3 the
+displayed endpoint is additionally limited by the squared-power stopping tolerance.
+The s=3 Gelfand upper estimate reaches the float64 feature-residual cancellation floor near
+1e-6; its late plateau is numerical, while the rigorous lower value remains informative.
 
-Two figures: legendre.png (the estimated g_m^lin vs c_n comparison) and legendre_points.png (the
-P-greedy point selection used for the estimate -- power-function snapshot + endpoint-clustered design).
-s=2 keeps Pow^2 above the float64 cancellation floor out to large m; s>=4 would stop early
-(~m=200) as Pow^2 -> 0 hits tol_p.
+Running this module produces the two-panel comparison figure ``figures/legendre.png`` and
+the joint two-panel design figure ``figures/legendre_points.png`` for s=2 and s=3.
+The sampling estimate uses the established 20000-point Chebyshev grid.  s=2 keeps Pow^2 above the
+float64 cancellation floor out to large m; smoother kernels stop earlier as Pow^2 -> 0 hits tol_p.
 """
 
 from __future__ import annotations
+from pathlib import Path
 import numpy as np
 import torch
 import matplotlib
@@ -27,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from kernels import LegendreMercerKernel
-from greedy import design_figure
+from greedy import PGreedy
 import widths
 
 torch.manual_seed(0)
@@ -37,14 +41,22 @@ torch.manual_seed(0)
 # widths tracked near n=1000.  This Mercer truncation is specific to the Legendre feature
 # expansion; similarly sized values in other drivers are sampling-node budgets, not M.
 
-def rates_figure(
-    s=2.0, n_trunc=24000, max_iter=1000, sel_grid=20000, cn_grid=5000, n_cap=1000,
+def _rates_panel(
+    ax,
+    s=2.0,
+    n_trunc=24000,
+    max_iter=1000,
+    sel_grid=20000,
+    cn_grid=5000,
+    n_cap=1000,
+    edge_ladder=480,
     compress_irls=True,
-    diagnostic_overlays=False,
 ):
+    """Draw one Legendre sampling-vs-Gelfand panel on ``ax``."""
     kernel = LegendreMercerKernel(s=s, n_trunc=n_trunc)
     r = widths.sampling_vs_gelfand(
         kernel, m_max=max_iter, sel_grid=sel_grid, cn_grid=cn_grid, n_cap=n_cap,
+        edge_ladder=edge_ladder,
         compress_irls=compress_irls,
     )
     m_list, g, cN, cn, n_used = r["m_list"], r["g"], r["cN"], r["cn"], r["n_used"]
@@ -54,7 +66,6 @@ def rates_figure(
     )  # geometric-mean representative for the manuscript rate guide
 
     # --- plot: estimated sampling numbers vs Gelfand widths ---
-    fig, ax = plt.subplots(figsize=(7.8, 5.6))
     ax.loglog(
         m_list,
         g,
@@ -73,25 +84,6 @@ def rates_figure(
         r["cn_certified"],
         color="C1",
     )
-    if diagnostic_overlays:
-        ax.loglog(
-            cN,
-            np.sqrt(cN) * cn_mid,
-            "-",
-            lw=1.3,
-            color="0.55",
-            label=r"$\sqrt{n}\,c_n$  (KPUU bound, Eq. 15 -- the closed gap)",
-        )
-        sig = kernel.sqrt_mu[:n_used].cpu().numpy()
-        ax.loglog(
-            np.arange(1, len(sig)),
-            sig[1:],
-            ".-",
-            ms=2.5,
-            color="C2",
-            alpha=0.55,
-            label=r"$\sigma_n=\sqrt{\mu_n}$  (singular numbers)",
-        )
     nn = np.arange(2, n_used)
     ax.loglog(
         nn,
@@ -100,36 +92,142 @@ def rates_figure(
         lw=1,
         label=r"$\propto n^{-(s-1/2)}$",
     )
-    if diagnostic_overlays:
-        ax.loglog(nn, sig[2] * (nn / 2.0) ** (-s), "k:", lw=1, label=r"$\propto n^{-s}$")
-    ax.set_xlabel(r"index  $m$ (sampling points)  $/$  $n$ (width)")
-    ax.set_ylabel(r"uniform-norm width  ($\|\cdot\|_\infty$)")
-    ax.set_title(
-        rf"Estimated sampling numbers $g_m^{{\mathrm{{lin}}}}$ vs Gelfand widths $c_n$"
-        rf"   (Legendre RKHS, $s={s:g}$)"
-    )
+    ax.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
+    ax.set_ylabel(r"$\|\cdot\|_\infty$ width")
+    ax.set_title(rf"Legendre RKHS, $s={s:g}$")
     ax.legend(fontsize=8)
     ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig("legendre.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
-    print(f"  figure saved -> legendre.png  (n_used={n_used})")
     return r
 
 
-def points_figure(s=2.0, grid=4000):
-    """P-greedy design for the Legendre kernel: endpoint-clustered (the structure behind the
-    smooth g_m curve).  Chebyshev candidate grid (boundary-concentrated Mercer kernel).
+def comparison_figure(
+    smoothness_values=(2.0, 3.0),
+    n_trunc=24000,
+    max_iter=1000,
+    sel_grid=20000,
+    cn_grid=5000,
+    n_cap=1000,
+    edge_ladder=480,
+    compress_irls=True,
+    out="figures/legendre.png",
+):
+    """Generate the paper's multi-panel Legendre comparison figure.
+
+    The returned dictionary prefixes every numerical result by its smoothness (for example,
+    ``s2_g`` and ``s3_cn``) so the publication runner can persist both panels in one NPZ.
     """
-    ker = LegendreMercerKernel(s=s, n_trunc=4000)
-    design_figure(
-        ker,
-        widths.box_grid(grid, 1, ker.dtype, kind="chebyshev"),
-        rf"Legendre $s={s:g}$",
-        "endpoint-clustered",
-        "legendre_points.png",
+    smoothness_values = tuple(float(s) for s in smoothness_values)
+    if not smoothness_values:
+        raise ValueError("smoothness_values must not be empty")
+
+    fig, axes = plt.subplots(
+        1,
+        len(smoothness_values),
+        figsize=(5.0 * len(smoothness_values), 4.2),
+        squeeze=False,
     )
+    combined = {}
+    for ax_i, s in zip(axes[0], smoothness_values):
+        result = _rates_panel(
+            ax_i,
+            s=s,
+            n_trunc=n_trunc,
+            max_iter=max_iter,
+            sel_grid=sel_grid,
+            edge_ladder=edge_ladder,
+            cn_grid=cn_grid,
+            n_cap=n_cap,
+            compress_irls=compress_irls,
+        )
+        tag = f"s{s:g}".replace(".", "p")
+        combined.update({f"{tag}_{key}": value for key, value in result.items()})
+        print(
+            f"  panel {tag}: n_used={result['n_used']}, "
+            f"sampling grid={sel_grid}"
+        )
+
+    fig.tight_layout()
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  figure saved -> {out}")
+    return combined
+
+
+def points_figure(
+    smoothness_values=(2.0, 3.0),
+    m=64,
+    grid=4000,
+    n_trunc=4000,
+    out="figures/legendre_points.png",
+):
+    """Compare Legendre P-greedy designs across smoothness values at one size."""
+    smoothness_values = tuple(float(s) for s in smoothness_values)
+    m = int(m)
+    if not smoothness_values:
+        raise ValueError("smoothness_values must not be empty")
+    if m < 1:
+        raise ValueError("m must be positive")
+
+    fig, axes = plt.subplots(
+        1,
+        len(smoothness_values),
+        figsize=(5.0 * len(smoothness_values), 4.8),
+        squeeze=False,
+    )
+    designs = {}
+    for ax, s in zip(axes[0], smoothness_values):
+        ker = LegendreMercerKernel(s=s, n_trunc=n_trunc)
+        max_iter = int(np.ceil(1.2 * m))
+        gr = PGreedy(ker, max_iter=max_iter, dtype=ker.dtype).fit(
+            widths.box_grid(grid, 1, ker.dtype, kind="chebyshev")
+        )
+        if gr.n_ < m:
+            plt.close(fig)
+            raise RuntimeError(
+                f"P-greedy stopped at {gr.n_} centers before the requested m={m} for s={s:g}"
+            )
+
+        n_shown = min(gr.n_, max_iter)
+        centers = gr.ctrs_[:n_shown].reshape(-1).cpu().numpy()
+        design = centers[:m]
+        order = np.arange(1, n_shown + 1)
+        ax.scatter(centers, order, c=order, cmap="viridis", s=16, zorder=2)
+        ax.axhline(m, color="C3", lw=1.2, ls="--", zorder=3)
+        ax.plot(
+            design,
+            np.full(m, m),
+            "|",
+            color="C3",
+            ms=9,
+            mew=1.4,
+            label=rf"first $m={m}$ centers",
+            zorder=4,
+        )
+        ax.set_xlabel(r"center location $x_i$")
+        ax.set_ylabel("selection step")
+        ax.set_title(rf"Legendre kernel: $s={s:g}$, $m={m}$")
+        ax.set_xlim(-1.03, 1.03)
+        ax.set_ylim(0, 1.03 * n_shown)
+        ax.legend(fontsize=8, loc="lower right")
+        ax.grid(True, alpha=0.3)
+        designs[f"s{s:g}"] = gr
+        print(
+            f"  s={s:g}, m={m:3d} design highlighted; "
+            f"selections shown through {n_shown}"
+        )
+
+    fig.suptitle("Endpoint clustering in Legendre P-greedy designs")
+    fig.tight_layout()
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=130, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    print(f"  figure saved -> {out}")
+    return designs
 
 
 if __name__ == "__main__":
-    rates_figure(s=2.0)
-    points_figure(s=2.0)
+    comparison_figure()
+    points_figure()

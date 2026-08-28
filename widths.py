@@ -47,20 +47,11 @@ def box_grid(
     domain=(-1.0, 1.0),
     edge_ladder: int = 0,
 ) -> torch.Tensor:
-    """n candidate points in `domain`^d, shape (n, d); with edge_ladder>0 (1D) also a geometric
-    endpoint ladder of 2*edge_ladder points.  The measure is kernel-specific (`kind`):
-      "chebyshev" -- 1D cos-spaced, dense at +-1, for a BOUNDARY-CONCENTRATED Mercer kernel
-          (Legendre: the Christoffel/power function peaks at +-1).  d>1 falls back to Sobol.
-      "uniform"   -- scrambled Sobol, the Lebesgue measure for a STATIONARY kernel (Matern, sinc,
-          periodic); its even coverage also serves the lower bound's max_p and resolves d>1
-          subspaces with far fewer points than i.i.d. uniform.
-    edge_ladder -- for a boundary-concentrated WIDTH grid: `edge_ladder` log-spaced offsets per
-        endpoint over [1e-10, 1e-1]*(hi-lo)/2.  The width-optimal residual spike sits within ~1/n^2
-        of +-1, inside the innermost Chebyshev node (~(pi/n)^2/2); the ladder lets the dual place
-        mass there (lifting the lower bound) and the minimax kill the spike (dropping the sup) --
-        Legendre s=2, N=1000: n=200 ratio 2.10 -> 1.06 at unchanged cost.  Greedy SELECTION grids
-        don't need it (g_m is a sup over placed points), so sampling_vs_gelfand ladders the c_n grid
-        only.  (Callers pass the kernel's grid_kind / domain; default stays Chebyshev.)
+    """Return ``n`` candidate points in ``domain``^d.
+
+    Chebyshev nodes are used for one-dimensional boundary-concentrated kernels;
+    otherwise a scrambled Sobol grid is used. In one dimension, ``edge_ladder``
+    appends log-spaced points near both endpoints for width calculations.
     """
     lo, hi = domain
     if kind == "chebyshev" and d == 1:
@@ -295,22 +286,12 @@ def _bnb_sup(
     max_evals: int = 400_000,
     chunk: int = 8192,
 ):
-    """CERTIFIED sup_x res2(x) on the box by branch-and-bound over hyperrectangle cells,
-    res2 = dist_H(a_x, V_p)^2.  On a cell with center c and per-coordinate halfwidths H,
-    sup r <= r(c) + cell_mod(H)  (r = sqrt(res2)), since |r(x)-r(y)| <= ||a_x-a_y||_H and
-    cell_mod is the kernel's rigorous modulus over the cell (1D: dist_bound at the halfwidth;
-    d>1: e.g. Matern's dist_bound at the half-diagonal).  Cells whose bound exceeds
-    best*(1+tol) are bisected along their longest axis, the rest pruned; the max active-leaf
-    bound is a TRUE upper bound at every stage (no seed luck -- this has caught the L-BFGS
-    multistart undershooting true sups by 4-10%), refining only near the peaks.  Feasible
-    whenever the residual peaks are pointlike; NOT for near-flat residual fields (periodic
-    d>1, whose orbit symmetry flattens res2 -- its exact gelfand_tails covers that case).
+    """Certify the residual supremum by branch-and-bound over box cells.
 
-    Returns (cert, seen, pts, vals, converged): cert >= sup res2 (rigorous always, loose if
-    the budget ran out), seen = largest evaluated res2 (<= sup, doubles as the estimate),
-    (pts, vals) = every evaluated center (peak seeds for the exchange), converged = cert
-    within ~3*tol of seen.  It can't converge where the widths hit the float64 noise floor
-    (band-limited kernel past its cliff); the caller then falls back to `seen`."""
+    Each cell uses ``r(center) + cell_mod(halfwidths)`` as a rigorous bound.
+    Returns the squared certificate, largest evaluated value, evaluated points and
+    values, and whether the certificate converged within tolerance and budget.
+    """
     lo, hi = domain
 
     def rvals(C):  # r = sqrt(res2) at the cell centers, chunked
@@ -456,48 +437,17 @@ def gelfand_widths(
     certify_evals: int = 400_000,
     return_info: bool = False,
 ):
-    """Gelfand widths c_n = d_n(K)_H by a reweighted-SVD (IRLS) minimax with a Remez EXCHANGE step,
-    as a monotone lower/upper pair.  WHAT IS GUARANTEED:
-      LOWER -- RIGOROUS (weak duality / Eckart-Young): c_n >= lower.  With a truncated coordinate
-               system, the lower bound uses only the represented energy, so truncation can loosen
-               but cannot overstate it.
-      UPPER -- a branch-and-bound CERTIFICATE (c_n <= upper to within certify_tol, no seed luck)
-               wherever the kernel gives a rigorous modulus: dist_bound (1D stationary) or
-               dist_bound_cell (d>1, Matern; use a looser certify_tol ~0.02 and a larger
-               certify_evals budget there -- see matern.py).  Elsewhere (Legendre endpoints,
-               kernels without a cell modulus) an ESTIMATE via L-BFGS multistart + self-check +
-               a 1D-Mercer endpoint sweep, holding only if the sup search resolved.
+    """Compute monotone lower/upper values for the Gelfand widths.
 
-    Dual ascent is the linear IRLS reweight w <- w*(r2 + floor*r2max).  `floor` is the DAMPING knob,
-    not just a zero guard: floor=1 (default) scales weights by r2/r2max + 1 in [1, 2], a smooth step
-    whose stable trajectory makes the grid-max subspace selection well-behaved OFF-grid; the
-    aggressive floor=1e-3 climbs the dual slightly faster but oscillates (Matern 1D ratios 1.19-1.28
-    vs 1.04-1.08; Legendre 1.29 vs 1.06 at n=200, with no better lower bound).  One eigendecomposition
-    gives Phi = U sqrt(Lam).  With `compress_irls=True` (the practical default), only the top
-    r_n = min(N, 3n+100) modes enter the IRLS eigensolve for index n.  With
-    `compress_irls=False`, all N coordinates are used, matching the full-coordinate manuscript
-    algorithm.  Under compression, discarded
-    coordinate energy is excluded from the lower bound: the retained covariance tail is therefore
-    conservative.
-    Each IRLS step takes the top-n right-singular subspace V_p and brackets a retained-coordinate
-    covariance tail below c_n^2 and sup_x dist(a_x, V_p)^2 above it.
-
-    EXCHANGE (default on without a feature_map; `exchange` overrides): stage-1's off-grid residual
-    peaks rejoin the dual point set, the basis is extended EXACTLY (_extend_system, O(N r_n k)), IRLS
-    re-runs warm for exch_iter steps, and the re-optimized sup is taken -- the bracket keeps max of
-    lowers, min of uppers (each valid alone).  This attacks the dominant gap, a grid-optimal subspace
-    that is bad OFF-grid: Matern nu=3/2 (1D, N=1000) n=200=N/5 ratio 1.69 -> ~1.05 at ~1.7x cost,
-    beating doubling n_iter (1.20) or the grid (1.63); d=3 (N=3000) 1.83 -> 1.56.  Auto-OFF for a
-    boundary-concentrated Mercer kernel (the endpoint spike just re-emerges at a new offset); there
-    the box_grid edge_ladder fixes the cause and the endpoint sweep resolves the sup.
-
-    refine=False returns the grid max (no certificate, no exchange).
-    Where the certificate can't converge within certify_evals -- widths at the float64 floor, e.g.
-    the band-limited kernel past N_eff -- it falls back to the B&B's best evaluated value and warns.
-    With return_info=True, a third result contains `upper_certified`, a boolean array propagated
-    through the monotone upper envelope.
-    Reliable for n <~ N/5; beyond it V_p interpolates the N translates, the residual vanishes at
-    every node, and the upper bound collapses (sampling_vs_gelfand caps n there)."""
+    The lower values are rigorous weak-duality bounds. Upper values are certified
+    where a kernel modulus lets branch-and-bound converge; otherwise they are
+    off-grid numerical estimates. ``compress_irls=True`` retains
+    ``min(N, 3n+100)`` dominant coordinates, while ``False`` uses all coordinates.
+    Exchange is enabled by default for stationary kernels and disabled for the
+    one-dimensional Mercer case. ``refine=False`` returns grid estimates without
+    certification or exchange. With ``return_info=True``, the third result contains
+    the boolean ``upper_certified`` mask.
+    """
     dt = kernel.dtype
     Xg = X.reshape(X.shape[0], -1).to(dt)
     G = kernel.eval(Xg, Xg).to(dt)
