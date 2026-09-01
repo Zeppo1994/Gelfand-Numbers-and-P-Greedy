@@ -1,162 +1,148 @@
-"""
-Supplemental experiment: estimated sampling numbers vs Gelfand-width lower/upper values for the
-MATERN kernel, in d=1 and d=3.  This experiment is not part of the manuscript's numerical section.
-
-The Legendre experiment (legendre.py) repeated for a Matern nu=3/2 RKHS -- a bounded kernel with
-regularly-varying (algebraic) singular numbers, the regime the comparison theorem of
-the companion manuscript covers.  For each dimension the estimated sampling numbers and c_n run
-parallel, with no observed sqrt(n) growth.  Here g_m^lin is numerically estimated from one P-greedy
-design, giving an upper surrogate rather than the global point-set infimum.  Matern is stationary,
-so the same implementation applies unchanged in d=3.
-
-Two figures: figures/matern.png (the estimated g_m^lin vs c_n comparison, d=1 and d=3) and
-figures/matern_points.png (the P-greedy design in d=1: quasi-uniform gap-bisection -- the structure
-behind the staircase g_m curve, contrast the endpoint-clustered Legendre design).
-"""
+"""Matérn P-greedy sampling curves and discrete covariance-tail lower bounds."""
 
 from __future__ import annotations
-from pathlib import Path
+
+import matplotlib
 import numpy as np
 import torch
-import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from greedy import power_function
 from kernels import MaternKernel
-from greedy import PGreedy, power_function
-import widths
+import lower_bounds as bounds
 
-torch.manual_seed(0)
-FIGURES_DIR = Path("figures")
+SPECS = [
+    (
+        1,
+        MaternKernel(nu=1.5, ell=0.3),
+        dict(m_max=460, sel_grid=16_000, n_cap=300),
+        dict(d=1, n_quad=512),
+    ),
+    (
+        3,
+        MaternKernel(nu=1.5, ell=0.6),
+        dict(m_max=400, sel_grid=20_000, n_cap=140),
+        dict(d=3, n_quad=512),
+    ),
+]
 
 
-def rates_figure(compress_irls=True):
-    specs = [
-        (
-            1,
-            MaternKernel(nu=1.5, ell=0.3),
-            dict(
-                m_max=460,
-                sel_grid=16000,
-                cn_grid=2000,
-                n_cap=300,
-                certify_evals=500_000,
-            ),
-        ),
-        (
-            3,
-            MaternKernel(nu=1.5, ell=0.6),
-            dict(
-                m_max=400,
-                sel_grid=20000,
-                cn_grid=8000,
-                n_cap=140,
-                refine_iters=100,
-                certify_tol=0.02,
-                certify_evals=500_000,
-            ),
-        ),
-    ]
-
+def comparison_figure(
+    *,
+    out="figures/matern.png",
+):
+    """Generate the one- and three-dimensional lower-bound comparison."""
     results = []
-    for d, ker, cfg in specs:
-        r = widths.sampling_vs_gelfand(ker, d=d, compress_irls=compress_irls, **cfg)
-        g_at_cN = np.exp(
-            np.interp(np.log(r["cN"]), np.log(r["m_list"]), np.log(r["g"]))
+    combined = {}
+    for d, kernel, sampling_config, lower_config in SPECS:
+        result = bounds.sampling_vs_lower_bound(
+            kernel,
+            d=d,
+            lower_bound_kwargs=lower_config,
+            **sampling_config,
         )
-        r["ratio_lo"] = g_at_cN / r["cn"]
-        r["ratio_hi"] = g_at_cN / r["cn_lo"]
-        r["ratio_kind"] = ("certified ratio interval" if r["cn_certified"].all()
-                           else "indicator range")
-        results.append((rf"Mat\'ern $\nu=3/2$, $d={d}$", r))
+        results.append((d, result))
+        bounds.add_prefixed_result(combined, f"d{d}", result)
         print(
-            f"Matern d={d}:  n_used={r['n_used']:4d}   "
-            f"median estimated g_m/c_n {r['ratio_kind']} = [{np.median(r['ratio_lo']):.2f}, "
-            f"{np.median(r['ratio_hi']):.2f}]  "
-            f"({int(r['cn_certified'].sum())}/{len(r['cN'])} uppers certified)"
+            f"Matérn d={d}: n_used={result['n_used']:4d}, "
+            "median P-greedy/lower-bound ratio="
+            f"{np.nanmedian(result['ratio']):.2f}"
         )
 
     fig, axes = plt.subplots(
-        1, len(specs), figsize=(5.0 * len(specs), 4.2), squeeze=False
+        1, len(SPECS), figsize=(5.0 * len(SPECS), 4.2), squeeze=False
     )
-    for j, (label, r) in enumerate(results):
-        # --- the two widths ---
-        ax = axes[0, j]
-        ax.loglog(
-            r["m_list"],
-            r["g"],
-            "o-",
-            ms=3.5,
-            color="C0",
-            label=r"$g_m^{\mathrm{lin}}$ (P-greedy estimate)",
+    for axis, (d, result) in zip(axes[0], results):
+        bounds.plot_sampling_estimate(axis, result["sampling_n"], result["sampling"])
+        bounds.plot_gelfand_lower_bound(axis, result["lower_n"], result["lower"])
+        axis.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
+        axis.set_ylabel(r"$\|\cdot\|_\infty$ width")
+        axis.set_title(rf"Matérn $\nu=3/2$, $d={d}$")
+        axis.legend(fontsize=8)
+        axis.grid(True, which="both", alpha=0.3)
+
+    output = bounds.finalize_figure(fig, out)
+    print(f"figure saved -> {output}")
+    return combined
+
+
+def points_figure(
+    *,
+    n_points=128,
+    snapshot_size=12,
+    grid=4_000,
+    query_grid=4_000,
+    out="figures/matern_points.png",
+):
+    """Plot a one-dimensional Matérn design and an intermediate power function."""
+    n_points = int(n_points)
+    snapshot_size = int(snapshot_size)
+    if not 1 <= snapshot_size < n_points:
+        raise ValueError("snapshot_size must satisfy 1 <= snapshot_size < n_points")
+
+    kernel = MaternKernel(nu=1.5, ell=0.3)
+    greedy = bounds.fit_p_greedy(
+        kernel,
+        max_iter=n_points,
+        sel_grid=grid,
+    )
+    if greedy.n_ < n_points:
+        raise RuntimeError(
+            f"P-greedy stopped at {greedy.n_} centers before n_points={n_points}"
         )
-        widths.plot_gelfand_bounds(
-            ax,
-            r["cN"],
-            r["cn_lo"],
-            r["cn"],
-            r["cn_certified"],
-            color="C1",
-        )
-        ax.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
-        ax.set_ylabel(r"$\|\cdot\|_\infty$ width")
-        ax.set_title(f"{label}\nmedian estimated $g_m/c_n$ {r['ratio_kind']} "
-                     f"[{np.median(r['ratio_lo']):.2f}, {np.median(r['ratio_hi']):.2f}]")
-        ax.legend(fontsize=8)
-        ax.grid(True, which="both", alpha=0.3)
 
-    fig.suptitle(
-        r"Mat\'ern estimated sampling numbers vs Gelfand widths: "
-        r"no observed $\sqrt{n}$ growth in $d=1$ and $d=3$"
+    centers = greedy.ctrs_.reshape(-1)
+    snapshot = centers[:snapshot_size]
+    query = torch.linspace(
+        *kernel.domain,
+        int(query_grid),
+        dtype=kernel.dtype,
+        device=centers.device,
+    )[:, None]
+    power = power_function(kernel, snapshot[:, None], query)
+    centers_np = centers.cpu().numpy()
+    query_np = query[:, 0].cpu().numpy()
+    power_np = power.cpu().numpy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 4.2))
+    axes[0].plot(query_np, power_np, color="C0", lw=1.6)
+    axes[0].plot(
+        snapshot.cpu().numpy(),
+        np.zeros(snapshot_size),
+        "|",
+        color="C3",
+        ms=10,
+        mew=1.4,
+        label=rf"first {snapshot_size} centers",
     )
-    fig.tight_layout()
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(FIGURES_DIR / "matern.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
-    print("figure saved -> figures/matern.png")
-
-
-def points_figure(grid=4000):
-    """Plot the one-dimensional Matérn P-greedy design."""
-    ker = MaternKernel(nu=1.5, ell=0.3)
-    gr = PGreedy(ker, max_iter=128, dtype=ker.dtype).fit(
-        widths.box_grid(grid, 1, ker.dtype, kind="uniform")
-    )
-    centers = gr.ctrs_.reshape(-1).cpu().numpy()
-    snapshot = gr.ctrs_[:12]
-    query = torch.linspace(-1, 1, 4000, dtype=ker.dtype).reshape(-1, 1)
-    power = power_function(ker, snapshot, query).cpu().numpy()
-    next_x = centers[12]
-    next_power = float(power_function(ker, snapshot, gr.ctrs_[12:13])[0])
-
-    fig, axes = plt.subplots(2, 1, figsize=(6.4, 8.0))
-    axes[0].plot(query.reshape(-1).numpy(), power, color="C0", lw=1.6,
-                 label=r"$\mathrm{Pow}_{12}(x)$")
-    axes[0].plot(centers[:12], np.zeros(12), "|", color="0.35", ms=14, mew=1.5,
-                 label="12 chosen centers")
-    axes[0].plot([next_x], [next_power], "*", color="C3", ms=16,
-                 label=r"next chosen point $=\arg\max\,\mathrm{Pow}$")
-    axes[0].axvline(next_x, color="C3", lw=0.8, ls=":")
-    axes[0].set(xlabel=r"$x \in [-1,1]$", ylabel=r"power function $\mathrm{Pow}_m(x)$",
-                title=r"Mat\'ern $\nu=3/2$: the P-greedy rule")
-    axes[0].set_ylim(0, 1.32 * max(float(power.max()), next_power))
-    axes[0].legend(fontsize=8, loc="upper right")
+    axes[0].axvline(centers_np[snapshot_size], color="C2", ls="--", lw=1.2)
+    axes[0].set_xlabel(r"$x$")
+    axes[0].set_ylabel(r"$P_{X_m}(x)$")
+    axes[0].set_title(rf"Power function after $m={snapshot_size}$ selections")
+    axes[0].legend(fontsize=8)
     axes[0].grid(True, alpha=0.3)
 
-    order = np.arange(1, len(centers) + 1)
-    axes[1].scatter(centers, order, c=order, cmap="viridis", s=14)
-    axes[1].set(xlabel="center position $x$", ylabel="selection order $n$",
-                title=r"Mat\'ern $\nu=3/2$: quasi-uniform greedy design",
-                xlim=(-1.03, 1.03))
+    order = np.arange(1, n_points + 1)
+    axes[1].scatter(centers_np, order, c=order, cmap="viridis", s=16)
+    axes[1].set_xlabel(r"center location $x_i$")
+    axes[1].set_ylabel("selection step")
+    axes[1].set_title(rf"Matérn P-greedy design, $n={n_points}$")
+    axes[1].set_xlim(-1.03, 1.03)
     axes[1].grid(True, alpha=0.3)
-    fig.suptitle("P-greedy point selection")
-    fig.tight_layout()
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(FIGURES_DIR / "matern_points.png", dpi=130, bbox_inches="tight", pad_inches=0.02)
-    plt.close(fig)
-    print("figure saved -> figures/matern_points.png")
+
+    output = bounds.finalize_figure(fig, out)
+    print(f"figure saved -> {output}")
+    return {
+        "centers": centers_np,
+        "query": query_np,
+        "power": power_np,
+        "snapshot_size": snapshot_size,
+        "n_used": greedy.n_,
+    }
 
 
 if __name__ == "__main__":
-    rates_figure()
+    comparison_figure()
     points_figure()

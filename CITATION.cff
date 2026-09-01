@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: If you use this software, please cite it using the metadata below.
-title: P-greedy sampling errors versus Gelfand widths
+title: P-greedy sampling estimates and Gelfand-width lower bounds
 type: software
 authors:
   - family-names: Neumayer

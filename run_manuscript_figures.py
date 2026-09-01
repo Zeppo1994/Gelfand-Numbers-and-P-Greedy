@@ -15,59 +15,39 @@ import traceback
 import numpy as np
 import torch
 
-
 REPO_ROOT = Path(__file__).resolve().parent
 
 import legendre
+import matern
 import paley_wiener
 import periodic_mixed
 
-COMPRESS_IRLS = False
 LEGENDRE_OPTIONS = {
     "smoothness_values": legendre.SMOOTHNESS_VALUES,
-    "n_trunc": legendre.MERCER_TRUNCATION,
     "sel_grid": legendre.CANDIDATE_GRID_SIZE,
-    "edge_ladder": legendre.ENDPOINT_LADDER_SIZE,
 }
-POINT_DESIGN_OPTIONS = {
+
+LEGENDRE_POINT_OPTIONS = {
     "smoothness_values": legendre.SMOOTHNESS_VALUES,
     "m": legendre.POINT_DESIGN_SIZE,
     "grid": legendre.CANDIDATE_GRID_SIZE,
-    "n_trunc": legendre.MERCER_TRUNCATION,
 }
 
-
 STAGES = (
-    {
-        "name": "legendre_points",
-        "output": "figures/legendre_points.png",
-        "run": lambda: legendre.points_figure(**POINT_DESIGN_OPTIONS),
-    },
-    {
-        "name": "legendre",
-        "output": "figures/legendre.png",
-        "run": lambda: legendre.comparison_figure(
-            compress_irls=COMPRESS_IRLS,
-            **LEGENDRE_OPTIONS,
-        ),
-    },
-    {
-        "name": "periodic_mixed",
-        "output": "figures/periodic_mixed.png",
-        "run": lambda: periodic_mixed.rates_figure(compress_irls=COMPRESS_IRLS),
-    },
-    {
-        "name": "paley_wiener",
-        "output": "figures/paley_wiener.png",
-        "run": lambda: paley_wiener.rates_figure(compress_irls=COMPRESS_IRLS),
-    },
+    ("legendre", legendre.comparison_figure, LEGENDRE_OPTIONS),
+    ("legendre_points", legendre.points_figure, LEGENDRE_POINT_OPTIONS),
+    ("matern", matern.comparison_figure, {}),
+    ("matern_points", matern.points_figure, {}),
+    ("periodic_mixed", periodic_mixed.comparison_figure, {}),
+    ("periodic_mixed_points", periodic_mixed.points_figure, {}),
+    ("paley_wiener", paley_wiener.comparison_figure, {}),
+    ("paley_wiener_points", paley_wiener.points_figure, {}),
 )
 
 PUBLICATION_SETTINGS = {
-    "compress_irls": COMPRESS_IRLS,
-    "stages": [stage["name"] for stage in STAGES],
+    "stages": [name for name, _, _ in STAGES],
     "legendre": LEGENDRE_OPTIONS,
-    "point_design": POINT_DESIGN_OPTIONS,
+    "legendre_points": LEGENDRE_POINT_OPTIONS,
 }
 
 
@@ -111,7 +91,9 @@ def initial_status(output_dir: Path) -> dict:
         "python": platform.python_version(),
         "torch": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
-        "cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "cuda_device": (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        ),
         "conda_environment": os.environ.get("CONDA_DEFAULT_ENV"),
         "repository": str(REPO_ROOT),
         "git_commit": git_value("rev-parse", "HEAD"),
@@ -122,15 +104,35 @@ def initial_status(output_dir: Path) -> dict:
     }
 
 
+def load_status(status_path: Path, output_dir: Path, resume: bool) -> dict:
+    if status_path.exists():
+        if not resume:
+            raise RuntimeError(
+                f"{status_path} already exists; pass --resume to continue it"
+            )
+        status = json.loads(status_path.read_text())
+    else:
+        status = initial_status(output_dir)
+    status.update(
+        state="running",
+        current_stage=None,
+        failed_stage=None,
+        error=None,
+        pid=os.getpid(),
+        finished_at=None,
+    )
+    status["settings"] = PUBLICATION_SETTINGS
+    return status
+
+
 def save_array_result(output_dir: Path, stage_name: str, result) -> str | None:
     if not isinstance(result, dict):
         return None
-    arrays = {}
-    for key, value in result.items():
-        if isinstance(value, np.ndarray):
-            arrays[key] = value
-        elif isinstance(value, (int, float, bool, np.number)):
-            arrays[key] = np.asarray(value)
+    arrays = {
+        key: np.asarray(value)
+        for key, value in result.items()
+        if isinstance(value, (np.ndarray, int, float, bool, np.number))
+    }
     if not arrays:
         return None
     path = output_dir / f"{stage_name}_data.npz"
@@ -168,30 +170,13 @@ def main() -> int:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     status_path = output_dir / "status.json"
-    if args.resume and status_path.exists():
-        status = json.loads(status_path.read_text())
-        status.update(
-            state="running",
-            current_stage=None,
-            failed_stage=None,
-            error=None,
-            pid=os.getpid(),
-            finished_at=None,
-        )
-        status["settings"] = PUBLICATION_SETTINGS
-    elif status_path.exists():
-        raise RuntimeError(f"{status_path} already exists; pass --resume to continue it")
-    else:
-        status = initial_status(output_dir)
-        status["state"] = "running"
-
-    os.chdir(output_dir)
+    status = load_status(status_path, output_dir, args.resume)
     write_status(status_path, status)
     print(f"[{utc_now()}] output directory: {output_dir}", flush=True)
 
-    for stage in STAGES:
-        name = stage["name"]
-        expected_output = output_dir / stage["output"]
+    for name, run_stage, options in STAGES:
+        relative_output = Path("figures") / f"{name}.png"
+        expected_output = output_dir / relative_output
         if name in status["completed_stages"] and expected_output.exists():
             print(f"[{utc_now()}] skipping completed stage: {name}", flush=True)
             continue
@@ -201,12 +186,14 @@ def main() -> int:
         write_status(status_path, status)
         print(f"[{utc_now()}] starting stage: {name}", flush=True)
         try:
-            result = stage["run"]()
+            result = run_stage(out=expected_output, **options)
             if not expected_output.exists():
-                raise RuntimeError(f"stage {name} did not create {expected_output.name}")
+                raise RuntimeError(
+                    f"stage {name} did not create {expected_output.name}"
+                )
             data_output = save_array_result(output_dir, name, result)
             status["outputs"][name] = {
-                "figure": expected_output.name,
+                "figure": str(relative_output),
                 "data": data_output,
             }
             if name not in status["completed_stages"]:

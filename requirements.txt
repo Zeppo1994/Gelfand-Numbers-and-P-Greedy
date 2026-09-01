@@ -1,4 +1,4 @@
-# Float64 pipeline, except the audited H^1_mix P-greedy curve; tested with torch 2.13 / numpy 2.2 / scipy 1.14 on Python 3.12
+# Lower-bound and P-greedy figure pipeline
 numpy>=2.2,<3
 scipy>=1.14,<2
 torch>=2.6

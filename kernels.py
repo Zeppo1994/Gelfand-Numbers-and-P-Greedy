@@ -1,219 +1,318 @@
-"""
-Kernels for the sampling-vs-Gelfand greedy experiments.  Each provides eval, diagonal, and the
-PGreedy grid cache (prepare / diag_grid / col); stationary kernels also add an analytic eval_grad
-(off-grid width refinement) and a rigorous RKHS modulus dist_bound(h) >= sup ||a_x - a_y||_H over
-separations <= h (the certificate widths' 1D branch-and-bound sup needs; Legendre has none -- its
-||d/dx a_x||_H diverges at the +-1 endpoints, so no finite modulus exists there).  Definitions and
-conventions are in the class docstrings.
-
-  * LegendreMercerKernel -- the Section-7.3 example of Pozharska & Ullrich (arXiv:2103.11124):
-    a Mercer kernel with smoothly decaying eigenvalues mu_k = 1/(1 + (k(k+1))^s) and an explicit
-    finite feature map (exposed for widths.py).
-  * MaternKernel -- half-integer Matern RBF (C^0/C^1/C^2 for nu = 1/2, 3/2, 5/2), stationary,
-    any dimension; finite smoothness -> algebraically decaying widths.
-  * PeriodicSobolevMixedKernel -- reproducing kernel of the periodic mixed-smoothness Sobolev
-    space H^m_mix([0,1]^d); tensor-product mixed-smoothness decay.
-  * PaleyWienerSincKernel -- band-limited sinc kernel on [-1,1]; singular numbers flat then
-    super-exponential -- a stress test outside the theorem's regularly-varying regime.
-
-Tensors default to float64 (the stability the greedy basis needs); override via `dtype`.
-"""
+"""Kernels used by the P-greedy and covariance-tail experiments."""
 
 from __future__ import annotations
+
 import heapq
 import math
+
 import numpy as np
 import torch
 from numpy.polynomial.legendre import leggauss
-from scipy.special import bernoulli, comb, factorial
+from scipy.integrate import solve_ivp
+from scipy.special import bernoulli, comb, digamma, factorial
 
 
-def normalized_legendre(
-    x: torch.Tensor, n_trunc: int, dtype: torch.dtype = torch.float64
-) -> torch.Tensor:
-    """L2([-1,1], dx)-normalized Legendre polynomials P_0..P_{n_trunc-1}.
+def _discrete_covariance_lower_tails(
+    covariance: np.ndarray,
+    n_max: int,
+    *,
+    exact_trace: float,
+) -> np.ndarray:
+    """Return covariance tails after one shared float64 safety adjustment.
 
-    x: (N,) points in [-1,1].  Returns P: (N, n_trunc), P[:, k] = sqrt((2k+1)/2) L_k(x),
-    L_k the standard Legendre polynomial (L_k(1)=1).  dtype: recurrence precision (float64).
+    In exact arithmetic, every positive discrete probability measure produces
+    a rigorous lower bound. The subtraction below avoids promoting tiny
+    positive eigensolver artifacts to resolved lower values; the exact trace
+    is restored at index zero.
     """
-    x = x.reshape(-1).to(dtype)
-    N = x.shape[0]
-    L = torch.empty((N, n_trunc), dtype=dtype, device=x.device)
-    if n_trunc >= 1:
-        L[:, 0] = 1.0
-    if n_trunc >= 2:
-        L[:, 1] = x
-    # Bonnet recurrence: (k+1) L_{k+1} = (2k+1) x L_k - k L_{k-1}
-    for k in range(1, n_trunc - 1):
-        L[:, k + 1] = ((2 * k + 1) * x * L[:, k] - k * L[:, k - 1]) / (k + 1)
-    # normalization factor sqrt((2k+1)/2)
-    k_idx = torch.arange(n_trunc, dtype=dtype, device=x.device)
-    norm = torch.sqrt((2.0 * k_idx + 1.0) / 2.0)
-    return L.mul_(norm)  # (N, n_trunc); in-place -- a second full-size temporary
-    # would double the peak memory of a large feature cache
+    covariance = np.asarray(covariance, dtype=np.float64)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("covariance must be a square matrix")
+    if not 0 <= n_max < covariance.shape[0]:
+        raise ValueError("n_max must be smaller than the covariance size")
+
+    covariance = 0.5 * (covariance + covariance.T)
+    eigenvalues = np.linalg.eigvalsh(covariance)
+    error = (
+        32.0
+        * covariance.shape[0]
+        * np.finfo(np.float64).eps
+        * max(float(eigenvalues[-1]), float(exact_trace))
+    )
+    eigenvalues = np.clip(eigenvalues - error, 0.0, None)
+    tails = np.cumsum(eigenvalues, dtype=np.float64)[::-1]
+    tails[0] = exact_trace
+    return tails[: n_max + 1]
+
+
+def _complex_legendre_p(eigenvalue: complex, points: np.ndarray) -> np.ndarray:
+    """Evaluate P_nu where nu(nu+1)=eigenvalue on real points in [-1, 1]."""
+    points = np.asarray(points, dtype=np.float64)
+    if np.any((points < -1.0) | (points > 1.0)):
+        raise ValueError("Legendre arguments must lie in [-1, 1]")
+
+    values = np.empty(points.shape, dtype=np.complex128)
+    values[points == 1.0] = 1.0
+    values[points == -1.0] = np.nan
+    interior = (points > -1.0) & (points < 1.0)
+    if not np.any(interior):
+        return values
+
+    unique, inverse = np.unique(points[interior], return_inverse=True)
+    descending = unique[::-1]
+    distance_from_one = 1.0 - descending[0]
+    epsilon = min(1e-10, 0.5 * distance_from_one)
+    start = 1.0 - epsilon
+    initial = np.array(
+        [1.0 - 0.5 * eigenvalue * epsilon, 0.5 * eigenvalue],
+        dtype=np.complex128,
+    )
+    solution = solve_ivp(
+        lambda x, state: np.array(
+            [
+                state[1],
+                (2.0 * x * state[1] - eigenvalue * state[0])
+                / (1.0 - x * x),
+            ]
+        ),
+        (start, descending[-1]),
+        initial,
+        t_eval=descending,
+        method="DOP853",
+        rtol=2e-12,
+        atol=2e-13,
+    )
+    if not solution.success:
+        raise RuntimeError(f"complex Legendre solve failed: {solution.message}")
+
+    values[interior] = solution.y[0, ::-1][inverse]
+    return values
 
 
 class LegendreMercerKernel:
-    """K_s(x,y) = sum_k mu_k P_k(x) P_k(y), mu_k = 1/(1 + (k(k+1))^s), with P_k the L2([-1,1], dx)-
-    normalized Legendre polynomials sqrt((2k+1)/2) L_k.  Explicit finite feature map (truncated at
-    n_trunc) phi_k = sqrt(mu_k) P_k: K = <phi(x), phi(y)>, phi(x) the RKHS coordinate of a_x =
-    K(.,x) -- exposed because widths.py needs it.
+    """Infinite Legendre Mercer kernel with algebraic eigenvalue decay.
 
-    s: smoothness (paper needs s > 1 for a bounded kernel).  n_trunc: Mercer truncation, chosen
-    >> #greedy points; the tail is O(k^{1-2s}), so K(x,x) truncation error is O(n_trunc^{2-2s}),
-    maximal at x=+-1 (~1/(2 n_trunc^2) for s=2) -- where the width endpoint spike lives.  Keep it
-    well below the smallest tracked c_n^2: the c_n endpoint sweep sees the bias in full, while the
-    greedy's endpoint-clustered centers cancel it.
+    Kernel evaluation uses a partial-fraction Green-kernel formula for the
+    Legendre operator. No feature truncation or grid-by-mode cache is used.
+    """
 
-    Conventions (verified vs the paper, Section 7.3): reference measure Lebesgue dx, NOT dx/2 --
-    giving sup_x sum_{k<m} P_k(x)^2 = m^2/2 at x=+-1, matching N(m)=(m-1)^2/2 up to index shift;
-    Legendre eigenvalue k(k+1), so mu_0 = 1."""
-
-    name = "legendre_mercer"
-    domain = (-1.0, 1.0)  # box the off-grid width refinement searches over
-    grid_kind = (
-        "chebyshev"  # boundary-concentrated Mercer: power/Christoffel fn peaks at +-1
-    )
-    # No eval_grad: the feature-map derivative carries a 1/(1-x^2) (Legendre derivative
-    # recurrence), singular at the +-1 endpoints where the sup concentrates -- so widths'
-    # off-grid refine uses finite differences for this kernel rather than an analytic gradient.
+    domain = (-1.0, 1.0)
+    grid_kind = "chebyshev"
 
     def __init__(
         self,
         s: float = 2.0,
-        n_trunc: int = 4000,
         dtype: torch.dtype = torch.float64,
-        device="cpu",
     ):
         self.s = float(s)
-        self.n_trunc = int(n_trunc)
+        order = round(self.s)
+        if order < 2 or abs(self.s - order) > 1e-12:
+            raise ValueError("s must be an integer greater than or equal to 2")
+        self.order = int(order)
         self.dtype = dtype
-        k = torch.arange(self.n_trunc, dtype=dtype, device=device)
-        t = self.s * torch.log(
-            k * (k + 1.0)
-        )  # (k(k+1))^s in log-space (avoids overflow)
-        self.mu = torch.sigmoid(-t)  # Mercer eigenvalues mu_k
-        self.sqrt_mu = torch.sqrt(self.mu)  # singular numbers sigma_k
 
-    def feature_map(self, X: torch.Tensor) -> torch.Tensor:
-        """phi(X): (N, n_trunc), rows are the RKHS coordinates of a_x = K(.,x)."""
-        X = X.reshape(-1)
-        P = normalized_legendre(X, self.n_trunc, self.dtype)  # (N, n_trunc)
-        return P.mul_(
-            self.sqrt_mu.to(P.device)
-        )  # broadcast over columns (in-place: P local)
+        roots = np.exp(
+            1j
+            * np.pi
+            * (2.0 * np.arange(self.order, dtype=np.float64) + 1.0)
+            / self.order
+        )
+        partial_fractions = 1.0 / (
+            self.order * roots ** (self.order - 1)
+        )
+        degrees = 0.5 * (-1.0 + np.sqrt(1.0 + 4.0 * roots))
+        self._roots = roots
+        self._resolvent_coefficients_np = (
+            -np.pi
+            * partial_fractions
+            / (2.0 * np.sin(np.pi * degrees))
+        )
+        self._endpoint_diagonal = float(
+            np.real(
+                -0.5
+                * np.sum(
+                    partial_fractions
+                    * (digamma(-degrees) + digamma(degrees + 1.0))
+                )
+            )
+        )
+
+    def _resolvent_basis(self, points: np.ndarray):
+        plus = np.stack(
+            [_complex_legendre_p(root, points) for root in self._roots]
+        )
+        if np.allclose(points, -points[::-1], rtol=0.0, atol=2e-14):
+            minus = plus[:, ::-1].copy()
+        else:
+            minus = np.stack(
+                [_complex_legendre_p(root, -points) for root in self._roots]
+            )
+        return plus, minus
 
     def eval(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Gram matrix K(X, Y): (Nx, Ny)."""
-        return self.feature_map(X) @ self.feature_map(Y).T
+        x = X.reshape(-1).detach().cpu().numpy()
+        y = Y.reshape(-1).detach().cpu().numpy()
+        x_plus, x_minus = self._resolvent_basis(x)
+        y_plus, y_minus = self._resolvent_basis(y)
+        lower = x[:, None] <= y[None, :]
+        matrix = np.zeros((x.size, y.size), dtype=np.complex128)
+        for coefficient, px, mx, py, my in zip(
+            self._resolvent_coefficients_np,
+            x_plus,
+            x_minus,
+            y_plus,
+            y_minus,
+        ):
+            matrix += coefficient * np.where(
+                lower,
+                mx[:, None] * py[None, :],
+                px[:, None] * my[None, :],
+            )
+        endpoint_pairs = (
+            (x[:, None] == y[None, :])
+            & (np.abs(x[:, None]) == 1.0)
+        )
+        matrix[endpoint_pairs] = self._endpoint_diagonal
+        return torch.as_tensor(
+            np.real(matrix),
+            dtype=self.dtype,
+            device=X.device,
+        )
 
     def diagonal(self, X: torch.Tensor) -> torch.Tensor:
-        """K(x, x) for each row of X: (Nx,)."""
-        Phi = self.feature_map(X)
-        return torch.sum(Phi * Phi, dim=1)
+        points = X.reshape(-1).detach().cpu().numpy()
+        plus, minus = self._resolvent_basis(points)
+        diagonal = np.real(
+            np.sum(
+                self._resolvent_coefficients_np[:, None] * plus * minus,
+                axis=0,
+            )
+        )
+        diagonal[np.abs(points) == 1.0] = self._endpoint_diagonal
+        return torch.as_tensor(
+            diagonal,
+            dtype=self.dtype,
+            device=X.device,
+        )
 
-    # ---- grid-cache interface used by the greedy loop (avoids recomputing the
-    #      Legendre feature map every iteration; centers are always grid points) ----
-    def prepare(self, Xd: torch.Tensor):
+    def prepare(self, Xd: torch.Tensor) -> None:
         self._Xd = Xd.reshape(-1, 1)
-        self._Phi = self.feature_map(self._Xd)  # (N, n_trunc), computed ONCE
-        self._diag = torch.sum(self._Phi * self._Phi, dim=1)
+        points = self._Xd[:, 0].detach().cpu().numpy()
+        if np.any(np.diff(points) < 0.0):
+            raise ValueError(
+                "the low-memory Legendre path requires a sorted grid"
+            )
+        plus, minus = self._resolvent_basis(points)
+        device = self._Xd.device
+        self._resolvent_coefficients = torch.as_tensor(
+            self._resolvent_coefficients_np,
+            dtype=torch.complex128,
+            device=device,
+        )
+        self._p_plus = torch.as_tensor(
+            plus,
+            dtype=torch.complex128,
+            device=device,
+        )
+        self._p_minus = torch.as_tensor(
+            minus,
+            dtype=torch.complex128,
+            device=device,
+        )
+        diagonal = torch.sum(
+            self._resolvent_coefficients[:, None]
+            * self._p_plus
+            * self._p_minus,
+            dim=0,
+        ).real
+        endpoint_mask = torch.abs(self._Xd[:, 0]) == 1.0
+        diagonal[endpoint_mask] = self._endpoint_diagonal
+        self._diag = diagonal.to(self.dtype)
 
     def diag_grid(self) -> torch.Tensor:
         return self._diag
 
     def col(self, j: int) -> torch.Tensor:
-        """K(Xd, Xd[j]) = Phi_grid @ phi(x_j): (N,), a cheap matvec."""
-        return self._Phi @ self._Phi[j]
+        j = int(j)
+        column = torch.empty(
+            self._Xd.shape[0],
+            dtype=self.dtype,
+            device=self._Xd.device,
+        )
+        column[: j + 1] = torch.sum(
+            self._resolvent_coefficients[:, None]
+            * self._p_minus[:, : j + 1]
+            * self._p_plus[:, j, None],
+            dim=0,
+        ).real.to(self.dtype)
+        if j + 1 < self._Xd.shape[0]:
+            column[j + 1 :] = torch.sum(
+                self._resolvent_coefficients[:, None]
+                * self._p_minus[:, j, None]
+                * self._p_plus[:, j + 1 :],
+                dim=0,
+            ).real.to(self.dtype)
+        column[j] = self._diag[j]
+        return column
 
+    def gelfand_lower_tails(self, n_max: int) -> np.ndarray:
+        """Return safely resolved squared covariance-tail lower bounds."""
+        n_max = int(n_max)
+        if n_max < 0:
+            raise ValueError("n_max must be nonnegative")
+        cutoff = max(200_000, 200 * (n_max + 1))
+        degrees = np.arange(cutoff, dtype=np.float64)
+        eigenvalues = 1.0 / (
+            1.0 + (degrees * (degrees + 1.0)) ** self.order
+        )
+        partial_tails = 0.5 * np.cumsum(
+            eigenvalues[::-1], dtype=np.float64
+        )[::-1]
+        allowance = (
+            32.0 * cutoff * np.finfo(np.float64).eps * partial_tails
+        )
+        return np.maximum(
+            partial_tails[: n_max + 1] - allowance[: n_max + 1],
+            0.0,
+        )
 
 class MaternKernel:
-    """Matern kernel with half-integer smoothness nu -- a rougher, algebraically decaying
-    alternative to the Legendre kernel.  Closed forms (no Bessel), r = ||x-y||, a = sqrt(2 nu)/ell:
-        nu = 1/2:  exp(-a r)                          (C^0, roughest)
-        nu = 3/2:  (1 + a r) exp(-a r)                (C^1)
-        nu = 5/2:  (1 + a r + (a r)^2/3) exp(-a r)    (C^2)
-    Exposes eval / eval_grad / diagonal and the greedy grid cache (prepare / diag_grid / col); any d.
-    """
+    """Half-integer Matérn kernel on [-1,1]^d."""
 
-    name = "matern"
-    domain = (-1.0, 1.0)  # box the off-grid width refinement searches over
-    grid_kind = (
-        "uniform"  # stationary: no endpoint preference -> Lebesgue candidate measure
-    )
+    domain = (-1.0, 1.0)
+    grid_kind = "equidistant"
 
     def __init__(
         self,
         nu: float = 1.5,
         ell: float = 1.0,
         dtype: torch.dtype = torch.float64,
-        device="cpu",
     ):
-        assert nu in (0.5, 1.5, 2.5), "half-integer nu in {0.5, 1.5, 2.5}"
+        if nu not in (0.5, 1.5, 2.5):
+            raise ValueError("nu must be one of 0.5, 1.5, 2.5")
         self.nu = float(nu)
         self.ell = float(ell)
-        self.a = math.sqrt(2.0 * self.nu) / self.ell  # inverse correlation length
+        self.a = math.sqrt(2.0 * self.nu) / self.ell
         self.dtype = dtype
 
-    def _corr(self, r: torch.Tensor) -> torch.Tensor:
-        """Matern correlation as a function of distance r (=1 at r=0, no cusp for the
-        half-integer forms used here, so no guard is needed in the forward eval)."""
-        ar = self.a * r
-        e = torch.exp(-ar)
+    def _corr(self, distance: torch.Tensor) -> torch.Tensor:
+        scaled = self.a * distance
+        exponential = torch.exp(-scaled)
         if self.nu == 0.5:
-            return e
+            return exponential
         if self.nu == 1.5:
-            return (1.0 + ar) * e
-        return (1.0 + ar + ar * ar / 3.0) * e  # nu = 5/2
+            return (1.0 + scaled) * exponential
+        return (1.0 + scaled + scaled * scaled / 3.0) * exponential
 
     def eval(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Gram matrix K(X, Y): (Nx, Ny).  X, Y are (n, d)."""
         X = X.reshape(X.shape[0], -1).to(self.dtype)
         Y = Y.reshape(Y.shape[0], -1).to(self.dtype)
         return self._corr(torch.cdist(X, Y))
 
-    def eval_grad(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """d/dX K(X_i, Y_j): (Nx, Ny, d).  Analytic: grad = [C'(r)/r] (x-y); for nu=3/2, 5/2 the
-        C'(r)/r has a closed form with the r cancelled, so it is finite at r=0 (unlike autograd
-        through cdist's 0/0 at coincident points); the nu=1/2 cusp is guarded to 0."""
-        X = X.reshape(X.shape[0], -1).to(self.dtype)
-        Y = Y.reshape(Y.shape[0], -1).to(self.dtype)
-        diff = X[:, None, :] - Y[None, :, :]  # (Nx, Ny, d)
-        r = torch.linalg.vector_norm(diff, dim=2)  # (Nx, Ny)
-        ar = self.a * r
-        e = torch.exp(-ar)
-        if self.nu == 1.5:
-            fac = -(self.a**2) * e  # C'(r)/r = -a^2 e^{-ar}
-        elif self.nu == 2.5:
-            fac = (
-                -(self.a**2 / 3.0) * (1.0 + ar) * e
-            )  # C'(r)/r = -(a^2/3)(1+ar) e^{-ar}
-        else:  # nu = 1/2: C'(r)/r = -a e^{-ar}/r, singular at r=0 -> guard to 0 (cusp)
-            fac = torch.where(
-                r > 1e-12, -self.a * e / r.clamp_min(1e-12), torch.zeros_like(r)
-            )
-        return fac[:, :, None] * diff  # (Nx, Ny, d)
-
     def diagonal(self, X: torch.Tensor) -> torch.Tensor:
-        """K(x, x) = 1 for every point: (Nx,)."""
         return torch.ones(X.shape[0], dtype=self.dtype, device=X.device)
 
-    def dist_bound(self, h: torch.Tensor) -> torch.Tensor:
-        """Rigorous RKHS modulus: sup_{||x-y|| <= h} ||a_x - a_y||_H <= sqrt(2(1 - corr(h))).
-        Exact for Matern (any d): ||a_x - a_y||^2 = 2(K(0) - K(r)) and the correlation is
-        decreasing in r, so the sup over r <= h sits at r = h.  Elementwise on a tensor of
-        separations; consumed by the branch-and-bound sup certificate in widths (d=1).
-        """
-        return torch.sqrt(torch.clamp(2.0 * (1.0 - self._corr(h)), min=0.0))
-
-    def dist_bound_cell(self, H: torch.Tensor) -> torch.Tensor:
-        """Cell modulus for the d>1 branch-and-bound sup certificate: the farthest cell point
-        sits at the corner, so dist_bound at the half-diagonal ||H||_2 bounds the cell (exact
-        for Matern at any d -- the modulus only sees the Euclidean distance)."""
-        return self.dist_bound(torch.linalg.vector_norm(H, dim=1))
-
-    # ---- grid-cache interface used by the strong greedy loop ----
-    def prepare(self, Xd: torch.Tensor):
+    def prepare(self, Xd: torch.Tensor) -> None:
         self._Xd = Xd.reshape(Xd.shape[0], -1).to(self.dtype)
         self._diag = torch.ones(
             self._Xd.shape[0], dtype=self.dtype, device=self._Xd.device
@@ -223,164 +322,140 @@ class MaternKernel:
         return self._diag
 
     def col(self, j: int) -> torch.Tensor:
-        """K(Xd, Xd[j]): (N,), one column."""
-        r = torch.cdist(self._Xd, self._Xd[j : j + 1])  # (N, 1)
-        return self._corr(r).reshape(-1)
+        distances = torch.cdist(self._Xd, self._Xd[j : j + 1])
+        return self._corr(distances).reshape(-1)
+
+    def gelfand_lower_tails(
+        self,
+        n_max: int,
+        *,
+        d: int = 1,
+        n_quad: int | None = None,
+    ) -> np.ndarray:
+        """Return squared tails of a positive discrete covariance.
+
+        Gauss-Legendre nodes represent normalized Lebesgue measure in one
+        dimension. In higher dimensions, a deterministic equal-weight Sobol
+        measure is used. Either discrete probability measure gives a lower
+        bound on the continuum supremum width in exact arithmetic.
+        """
+        n_max = int(n_max)
+        d = int(d)
+        if d < 1:
+            raise ValueError("d must be positive")
+        if n_quad is None:
+            n_quad = max(n_max + 64, 400 if d == 1 else 512)
+        if not 0 <= n_max < n_quad:
+            raise ValueError("n_max must be smaller than n_quad")
+
+        if d == 1:
+            nodes, weights = leggauss(n_quad)
+            points = torch.from_numpy(nodes).to(self.dtype).reshape(-1, 1)
+            sqrt_weights = np.sqrt(0.5 * weights)
+        else:
+            engine = torch.quasirandom.SobolEngine(dimension=d, scramble=True, seed=0)
+            points = 2.0 * engine.draw(n_quad).to(self.dtype) - 1.0
+            sqrt_weights = np.full(n_quad, 1.0 / math.sqrt(n_quad))
+
+        gram = self.eval(points, points).cpu().numpy()
+        covariance = sqrt_weights[:, None] * gram * sqrt_weights[None, :]
+        return _discrete_covariance_lower_tails(
+            covariance,
+            n_max,
+            exact_trace=1.0,
+        )
 
 
 class PeriodicSobolevMixedKernel:
-    r"""Reproducing kernel of the periodic mixed-smoothness Sobolev space
-    H^m_mix([0,1]^d) -- Berlinet & Thomas-Agnan, RKHS book, p.318 (Example 19
-    tensorized d times).  It is the d-fold tensor product of the univariate kernel
+    """Periodic mixed-smoothness Sobolev kernel on [0,1]^d."""
 
-        k_1(s,t) = 1 + (-1)^{m-1}/(2m)! * B_{2m}(|s-t|),
-
-    with B_{2m} the Bernoulli polynomial of degree 2m; m an integer >= 1.  The
-    norm is  ||u||^2 = (int u)^2 + int (u^{(m)})^2  per coordinate, mixed across
-    coordinates -- i.e. the m-fold MIXED derivative lives in L2.
-
-    Fourier diagonalization (verified numerically): on the 1D torus
-        k_1(s,t) = sum_{k in Z} lambda_k e^{2 pi i k (s-t)},
-        lambda_0 = 1,   lambda_k = (2 pi |k|)^{-2m}  (k != 0),
-    so the tensor eigenvalues are lambda_{k_1..k_d} = prod_j lambda_{k_j} -- the
-    mixed-smoothness decay.  Since B_{2m}(x) = B_{2m}(1-x), the argument |s-t| may
-    be taken as the periodic distance min(|s-t|, 1-|s-t|) with no change in value.
-
-    Domain [0,1]^d; stationary and periodic, so K(x,x) = k_1(0)^d is constant.  Exposes eval /
-    eval_grad / diagonal and the greedy grid cache (prepare / diag_grid / col); any d, inferred
-    from the input points (same object serves 1D or 2D).
-    """
-
-    name = "periodic_sobolev_mix"
-    domain = (0.0, 1.0)  # fundamental cell; a [-1,1] box would seed periodic images
-    grid_kind = (
-        "uniform"  # stationary/periodic: uniform candidate measure (matches grid01)
-    )
+    domain = (0.0, 1.0)
+    grid_kind = "periodic"
 
     def __init__(
-        self, m: int = 1, d: int = 1, dtype: torch.dtype = torch.float64, device="cpu"
+        self,
+        m: int = 1,
+        d: int = 1,
+        dtype: torch.dtype = torch.float64,
+        device: str = "cpu",
     ):
         self.m = int(m)
-        self.d = int(d)  # reference dimension (for the theoretical rate); eval infers d
+        self.d = int(d)
         self.dtype = dtype
-        N = 2 * self.m
-        B = bernoulli(N)  # Bernoulli numbers B_0..B_{2m} (B_1 = -1/2)
-        # B_{2m}(x) = sum_{j=0}^{2m} C(2m,j) B_j x^{2m-j}; store descending powers.
-        coeffs = [float(comb(N, j, exact=True) * B[j]) for j in range(N + 1)]
-        self.coeffs = torch.tensor(coeffs, dtype=dtype, device=device)
-        self.pref = float((-1.0) ** (self.m - 1) / factorial(N))  # (-1)^{m-1}/(2m)!
-        self._k1_0 = 1.0 + self.pref * float(coeffs[-1])  # k_1(0) = 1 + pref*B_{2m}(0)
+        degree = 2 * self.m
+        numbers = bernoulli(degree)
+        coefficients = [
+            float(comb(degree, j, exact=True) * numbers[j])
+            for j in range(degree + 1)
+        ]
+        self.coeffs = torch.tensor(coefficients, dtype=dtype, device=device)
+        self.pref = float((-1.0) ** (self.m - 1) / factorial(degree))
+        self._k1_0 = 1.0 + self.pref * float(coefficients[-1])
 
-    def _bern(self, r: torch.Tensor) -> torch.Tensor:
-        """B_{2m}(r) by Horner.  Coeffs follow r's device, so the same kernel evaluates
-        on GPU tensors (the heavy width linalg) and on CPU tensors (the scipy refine).
-        """
-        out = torch.zeros_like(r)
-        for c in self.coeffs.to(r.device):
-            out = out * r + c
-        return out
+    def _bern(self, distance: torch.Tensor) -> torch.Tensor:
+        result = torch.zeros_like(distance)
+        for coefficient in self.coeffs.to(distance.device):
+            result = result * distance + coefficient
+        return result
 
-    def _bern_deriv(self, r: torch.Tensor) -> torch.Tensor:
-        """B'_{2m}(r) by Horner over the derivative coefficients (coeffs[j] r^{2m-j} ->
-        coeffs[j] (2m-j) r^{2m-j-1}, dropping the constant term); used by eval_grad."""
-        out = torch.zeros_like(r)
-        Nb = 2 * self.m
-        for j, c in enumerate(self.coeffs.to(r.device)):
-            if j == Nb:  # constant term -> derivative 0
-                break
-            out = out * r + c * (Nb - j)
-        return out
-
-    def _k1(self, r: torch.Tensor) -> torch.Tensor:
-        """Univariate kernel as a function of the (periodic) distance r in [0,1]."""
-        return 1.0 + self.pref * self._bern(r)
+    def _k1(self, distance: torch.Tensor) -> torch.Tensor:
+        return 1.0 + self.pref * self._bern(distance)
 
     def eval(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Gram matrix K(X, Y): (Nx, Ny).  X, Y are (n, d) points in [0,1]^d."""
         X = X.reshape(X.shape[0], -1).to(self.dtype)
         Y = Y.reshape(Y.shape[0], -1).to(self.dtype)
-        diff = X[:, None, :] - Y[None, :, :]  # (Nx, Ny, d)
-        # periodic (torus) distance r in [0,1/2], correct for ANY real inputs: fold by the
-        # nearest integer, so points off [0,1]^d (from the off-grid width refine) stay valid.
-        r = torch.abs(diff - torch.round(diff))
-        return self._k1(r).prod(dim=2)  # tensor product across coordinates
-
-    def eval_grad(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """d/dX K(X_i, Y_j): (Nx, Ny, d), gradient in the first argument.  Analytic -- the
-        periodic-distance fold has a clean a.e. derivative -- so widths' off-grid sup refine
-        uses exact gradients instead of finite differences.  Per coordinate,
-        d/dx_c K = k1'(r_c) sign(fold_c) * prod_{c'!=c} k1(r_c')."""
-        X = X.reshape(X.shape[0], -1).to(self.dtype)
-        Y = Y.reshape(Y.shape[0], -1).to(self.dtype)
-        diff = X[:, None, :] - Y[None, :, :]  # (Nx, Ny, d)
-        fold = diff - torch.round(diff)  # periodic residual in [-1/2, 1/2]
-        r = torch.abs(fold)
-        k1 = self._k1(r)  # (Nx, Ny, d) per-coordinate kernel
-        dk1 = self.pref * self._bern_deriv(r) * torch.sign(fold)  # d k1(r_c)/d x_c
-        cofactor = (
-            k1.prod(dim=2, keepdim=True) / k1
-        )  # prod over the OTHER coords (k1>0)
-        return cofactor * dk1  # (Nx, Ny, d)
+        difference = X[:, None, :] - Y[None, :, :]
+        distance = torch.abs(difference - torch.round(difference))
+        return self._k1(distance).prod(dim=2)
 
     def diagonal(self, X: torch.Tensor) -> torch.Tensor:
-        """K(x, x) = k_1(0)^d for every point: (Nx,)."""
         d = X.reshape(X.shape[0], -1).shape[1]
         return torch.full(
             (X.shape[0],), self._k1_0**d, dtype=self.dtype, device=X.device
         )
 
-    def dist_bound(self, h: torch.Tensor) -> torch.Tensor:
-        """UNIVARIATE rigorous RKHS modulus: sup_{|s-t| <= h} ||a_s - a_t||_H =
-        sqrt(2(k_1(0) - k_1(min(h, 1/2)))) -- exact because (-1)^{m-1} B_{2m} is decreasing
-        on [0, 1/2] (periodic distance never exceeds 1/2).  Only for the d=1 kernel; the
-        branch-and-bound sup certificate in widths consumes it on 1D grids only."""
-        return torch.sqrt(
-            torch.clamp(2.0 * (self._k1_0 - self._k1(torch.clamp(h, max=0.5))), min=0.0)
-        )
-
-    def gelfand_tails(self, n_max: int) -> np.ndarray:
-        r"""EXACT Gelfand widths of the translate set on the full torus, by symmetry.  The set
-        {a_x : x in T^d} is an orbit of the translation group and the kernel is diagonal in
-        characters, so (averaging over Haar measure; Pinkus, n-widths of orbits) the top-n
-        character span is an optimal subspace and
-
-            c_n^2 = sum_{k > n} lambda_k,   lambda sorted descending, cos/sin pairs twice.
-
-        Exact whenever n closes a degenerate shell (lambda_{n-1} > lambda_n strictly); at a
-        mid-shell n it is the exact LOWER end of the interval [sqrt(tail_n), sqrt(tail_shell)]
-        containing c_n (a real invariant subspace needs whole cos/sin multiplets).
-
-        Returns tails[n] = c_n^2 for n = 0..n_max: trace k_1(0)^d minus the exact top-n sum
-        (top modes enumerated by a lattice max-heap, no truncated-box error).  float64
-        cancellation floors the tails near ~1e-16 * k_1(0)^d, i.e. c_n below ~1e-8 is noise.
-        """
-        Kdim = n_max + 2  # single-axis modes alone outrank anything with k > n_max
-        vals = [1.0] + [(2.0 * math.pi * k) ** (-2 * self.m) for k in range(1, Kdim)]
-        mult = [1] + [2] * (Kdim - 1)  # +-k <-> cos/sin pair
-        heap = [
-            (-1.0, (0,) * self.d)
-        ]  # (-product eigenvalue, per-dim distinct-value index)
-        seen = {(0,) * self.d}
-        lam, count = [], 0
-        while heap and count <= n_max:
-            negv, idx = heapq.heappop(heap)
-            m_k = 1
-            for j in idx:
-                m_k *= mult[j]
-            lam.extend([-negv] * m_k)
-            count += m_k
-            for c in range(self.d):  # lattice neighbors: one index up per coordinate
-                nidx = idx[:c] + (idx[c] + 1,) + idx[c + 1 :]
-                if nidx not in seen and nidx[c] < Kdim:
-                    seen.add(nidx)
-                    heapq.heappush(heap, (negv * vals[nidx[c]] / vals[idx[c]], nidx))
-        top = np.cumsum(np.array(lam[: n_max + 1]))
-        return np.concatenate([[self._k1_0**self.d], self._k1_0**self.d - top])[
-            : n_max + 1
+    def gelfand_lower_tails(self, n_max: int) -> np.ndarray:
+        """Return squared complex Fourier widths as lower bounds for real widths."""
+        n_max = int(n_max)
+        distinct_count = n_max + 2
+        values = [1.0] + [
+            (2.0 * math.pi * k) ** (-2 * self.m)
+            for k in range(1, distinct_count)
         ]
+        multiplicities = [1] + [2] * (distinct_count - 1)
+        heap = [(-1.0, (0,) * self.d)]
+        seen = {(0,) * self.d}
+        eigenvalues: list[float] = []
+        count = 0
+        while heap and count <= n_max:
+            negative_value, index = heapq.heappop(heap)
+            multiplicity = math.prod(multiplicities[j] for j in index)
+            eigenvalues.extend([-negative_value] * multiplicity)
+            count += multiplicity
+            for coordinate in range(self.d):
+                neighbor = (
+                    index[:coordinate]
+                    + (index[coordinate] + 1,)
+                    + index[coordinate + 1 :]
+                )
+                if neighbor not in seen and neighbor[coordinate] < distinct_count:
+                    seen.add(neighbor)
+                    heapq.heappush(
+                        heap,
+                        (
+                            negative_value
+                            * values[neighbor[coordinate]]
+                            / values[index[coordinate]],
+                            neighbor,
+                        ),
+                    )
 
-    # ---- grid-cache interface used by the strong greedy loop ----
-    def prepare(self, Xd: torch.Tensor):
+        trace = self._k1_0**self.d
+        removed = np.cumsum(np.asarray(eigenvalues[: n_max + 1]))
+        tails = np.concatenate([[trace], trace - removed])[: n_max + 1]
+        return np.maximum(tails, 0.0)
+
+    def prepare(self, Xd: torch.Tensor) -> None:
         self._Xd = Xd.reshape(Xd.shape[0], -1).to(self.dtype)
         self._diag = self.diagonal(self._Xd)
 
@@ -388,114 +463,64 @@ class PeriodicSobolevMixedKernel:
         return self._diag
 
     def col(self, j: int) -> torch.Tensor:
-        """K(Xd, Xd[j]): (N,), one column."""
         return self.eval(self._Xd, self._Xd[j : j + 1]).reshape(-1)
 
 
 class PaleyWienerSincKernel:
-    r"""Reproducing kernel of the Paley-Wiener space of band-limited functions restricted to
-    [-1,1] -- the running example of the Strobl slides (Slepian's prolate setting), a bounded
-    STATIONARY kernel whose singular numbers do NOT decay algebraically.
+    """Band-limited sinc kernel on [-1,1]."""
 
-        K_c(s,t) = sin(c (s-t)) / (pi (s-t)) = (c/pi) * sinc(c (s-t)/pi),   s,t in [-1,1],
-
-    reproducing PW_c = { f in L2(R) : supp(hat f) subset [-c,c] } (K(x,x) = c/pi).  Its L2([-1,1])
-    operator T_c is diagonalized by the prolate spheroidal functions, with Slepian eigenvalues
-    lambda_k ~ 1 for k < N_eff and a SUPER-EXPONENTIAL cliff past the effective dimension
-
-        N_eff = 2c/pi   (Shannon number / time-bandwidth product).
-
-    So sigma_k = sqrt(lambda_k) are flat then plunge at k ~ N_eff -- not the regularly-varying decay
-    the theorem in the companion manuscript assumes, hence a stress test: sampling-number estimates and c_n are
-    ~flat then fall off the same cliff.  Univariate; provides an analytic eval_grad (exact off-grid
-    width refinement) and singular_numbers() (the Nystrom prolate spectrum).  Domain [-1,1], so it
-    drops into box_grid / widths / greedy unchanged.
-
-    NUMERICAL FLOOR: band-limited => a Gram over N >> N_eff points has numerical rank ~ N_eff, so the
-    float64 widths recover reliably only above the floor ~sqrt(eps)*sqrt(K(x,x)) ~ 1e-7 (n <~ N_eff);
-    past the cliff the recovered values ARE the floor.  The true super-exponentially small widths there
-    would need an arbitrary-precision (mpmath) reimplementation of the width minimax.
-    """
-
-    name = "paley_wiener_sinc"
-    domain = (-1.0, 1.0)  # box the off-grid width refinement searches over
-    grid_kind = (
-        "uniform"  # stationary band-limited: Lebesgue candidate measure, not Chebyshev
-    )
+    domain = (-1.0, 1.0)
+    grid_kind = "equidistant"
 
     def __init__(
         self,
         c: float | None = None,
         n_eff: float | None = None,
         dtype: torch.dtype = torch.float64,
-        device="cpu",
     ):
-        assert (c is None) != (n_eff is None), "give exactly one of c, n_eff"
+        if (c is None) == (n_eff is None):
+            raise ValueError("give exactly one of c and n_eff")
         self.c = float(c) if c is not None else float(n_eff) * math.pi / 2.0
-        self.n_eff = 2.0 * self.c / math.pi  # Shannon number = time-bandwidth product
-        self.diag_val = self.c / math.pi  # K(x,x), constant (stationary)
+        self.n_eff = 2.0 * self.c / math.pi
+        self.diag_val = self.c / math.pi
         self.dtype = dtype
 
-    def _kfun(self, u: torch.Tensor) -> torch.Tensor:
-        """(c/pi) sinc(c u / pi) = sin(c u)/(pi u); torch.sinc gives the c/pi limit at u=0."""
-        return self.diag_val * torch.sinc(self.c * u / math.pi)
+    def _kfun(self, difference: torch.Tensor) -> torch.Tensor:
+        return self.diag_val * torch.sinc(self.c * difference / math.pi)
 
     def eval(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """Gram matrix K(X, Y): (Nx, Ny)."""
         X = X.reshape(-1, 1).to(self.dtype)
         Y = Y.reshape(1, -1).to(self.dtype)
         return self._kfun(X - Y)
 
-    def eval_grad(self, X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-        """d/dX K(X_i, Y_j): (Nx, Ny, 1).  Analytic: for f(u)=sin(cu)/(pi u),
-        f'(u) = [c u cos(c u) - sin(c u)] / (pi u^2), finite at u=0 (odd, -> 0 via the
-        -(c^3/3pi) u Taylor branch) -- so widths' off-grid sup refine uses exact gradients.
-        """
-        X = X.reshape(-1, 1).to(self.dtype)
-        Y = Y.reshape(1, -1).to(self.dtype)
-        u = X - Y
-        cu = self.c * u
-        num = cu * torch.cos(cu) - torch.sin(cu)
-        small = u.abs() < 1e-6
-        u_safe = torch.where(small, torch.ones_like(u), u)
-        g = torch.where(
-            small, -(self.c**3) * u / (3.0 * math.pi), num / (math.pi * u_safe * u_safe)
-        )
-        return g.unsqueeze(-1)  # (Nx, Ny, 1)
-
     def diagonal(self, X: torch.Tensor) -> torch.Tensor:
-        """K(x, x) = c/pi for every point: (Nx,)."""
-        n = X.reshape(-1, 1).shape[0]
-        return torch.full((n,), self.diag_val, dtype=self.dtype, device=X.device)
+        count = X.reshape(-1, 1).shape[0]
+        return torch.full(
+            (count,), self.diag_val, dtype=self.dtype, device=X.device
+        )
 
-    def dist_bound(self, h: torch.Tensor) -> torch.Tensor:
-        """Rigorous RKHS modulus: sup_{|s-t| <= h} ||a_s - a_t||_H <= min(L h, 2 sqrt(K(0)))
-        with L = sup_x ||d/dx a_x||_H = sqrt(-K''(0)) = sqrt(c^3/(3 pi)).  The exact
-        2(K(0)-K(h)) is NOT monotone for the oscillatory sinc, so the Lipschitz form is used
-        (same small-h asymptotics, ~L h); the 2 sqrt(K(0)) cap is the triangle inequality.
-        Consumed by the branch-and-bound sup certificate in widths (d=1)."""
-        L = math.sqrt(self.c**3 / (3.0 * math.pi))
-        return torch.clamp(L * h, max=2.0 * math.sqrt(self.diag_val))
-
-    def singular_numbers(self, n: int, n_quad: int | None = None) -> np.ndarray:
-        """sigma_k = sqrt(lambda_k(c)), k=1..n: the top-n prolate singular numbers of the
-        embedding, from a Gauss-Legendre Nystrom discretization of T_c on [-1,1].  These are
-        the flat-then-super-exponential Slepian eigenvalues (independent of the greedy/width
-        code); used only for the sigma_n overlay and to mark the N_eff cliff."""
+    def gelfand_lower_tails(
+        self, n_max: int, n_quad: int | None = None
+    ) -> np.ndarray:
+        """Return safely adjusted squared Gauss-Legendre covariance tails."""
+        n_max = int(n_max)
         if n_quad is None:
-            n_quad = max(200, int(8 * self.n_eff) + 50)
-        t, w = leggauss(n_quad)  # nodes/weights on [-1,1]
-        U = t[:, None] - t[None, :]
-        Kmat = (self.c / math.pi) * np.sinc(
-            self.c * U / math.pi
-        )  # np.sinc(0)=1 -> c/pi
-        sw = np.sqrt(w)
-        A = sw[:, None] * Kmat * sw[None, :]  # symmetric similarity of T_c
-        lam = np.clip(np.sort(np.linalg.eigvalsh(A))[::-1], 0.0, None)
-        return np.sqrt(lam[:n])
+            n_quad = max(200, int(8 * self.n_eff) + 50, n_max + 1)
+        if not 0 <= n_max < n_quad:
+            raise ValueError("n_max must be smaller than n_quad")
 
-    # ---- grid-cache interface used by the strong greedy loop ----
-    def prepare(self, Xd: torch.Tensor):
+        nodes, weights = leggauss(n_quad)
+        differences = nodes[:, None] - nodes[None, :]
+        gram = self.diag_val * np.sinc(self.c * differences / math.pi)
+        sqrt_weights = np.sqrt(0.5 * weights)
+        covariance = sqrt_weights[:, None] * gram * sqrt_weights[None, :]
+        return _discrete_covariance_lower_tails(
+            covariance,
+            n_max,
+            exact_trace=self.diag_val,
+        )
+
+    def prepare(self, Xd: torch.Tensor) -> None:
         self._Xd = Xd.reshape(-1, 1).to(self.dtype)
         self._diag = torch.full(
             (self._Xd.shape[0],),
@@ -508,5 +533,4 @@ class PaleyWienerSincKernel:
         return self._diag
 
     def col(self, j: int) -> torch.Tensor:
-        """K(Xd, Xd[j]): (N,), one column."""
         return self._kfun(self._Xd - self._Xd[j : j + 1]).reshape(-1)

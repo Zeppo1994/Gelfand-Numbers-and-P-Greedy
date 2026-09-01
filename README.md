@@ -1,37 +1,41 @@
-# Sampling numbers vs Gelfand widths
+# P-greedy sampling estimates and Gelfand-width lower bounds
 
-Numerical experiments for optimal recovery of bounded-kernel RKHS unit balls in the
-uniform norm. The code compares linear sampling numbers with Gelfand widths for
-Legendre, Matérn, periodic mixed-Sobolev, and Paley–Wiener kernels.
+Numerical RKHS experiments comparing grid-based P-greedy sampling estimates with
+computable lower bounds for Gelfand widths.
 
-## Quantities
+For the same measurement budget $n$, the exact continuum quantities satisfy
 
-- `g_m^lin`: best worst-case error using `m` point evaluations.
-- `c_n`: best worst-case error using `n` arbitrary linear measurements.
+\[
+\underline{c}_n \leq c_n \leq g_n^{\mathrm{lin}} \leq P(X_n),
+\]
 
-The code estimates `g_m^lin` with the power function of one P-greedy design on a
-finite candidate grid. These values are constructive upper surrogates, not solutions
-of the global point-set optimization. For equal budgets, `c_n ≤ g_n^lin`.
+where $P(X_n)$ is the worst-case power-function error of the selected point set.
+The plots use its maximum on a finite candidate grid, denoted implicitly by the
+P-greedy curve. That grid maximum is a numerical surrogate for $P(X_n)$, not a
+certified continuum upper bound or a solution of the global point-set problem.
 
-The reported Gelfand-width interval consists of a rigorous lower value `c_n^-` and an
-upper value `c_n^+`. The upper value is certified only where the returned
-`cn_certified` mask is true; elsewhere it is an off-grid numerical estimate.
+The four experiments are:
 
-## Setup
+- Legendre Mercer kernels on $[-1,1]$;
+- Matérn kernels on $[-1,1]^d$;
+- periodic mixed-Sobolev kernels on $[0,1]^d$;
+- Paley-Wiener sinc kernels on $[-1,1]$.
 
-Requires Python 3.10 or newer. The reproducible environment uses Python 3.12.
+## Run
+
+Python 3.10 or newer is required. Create the reproducible Conda environment and
+run the tests with
 
 ```bash
 conda env create -f environment.yml
 conda activate sampling-numbers
-pytest -q
+python -m pytest -q
 ```
 
-CUDA is used automatically for the large P-greedy grids. Width computations run in
-float64 on the CPU. All experiments support CPU-only execution, but the publication
-settings are expensive; `periodic_mixed.py` in particular needs substantial memory.
+Alternatively, install the same runtime dependencies with
+`python -m pip install -r requirements.txt`.
 
-## Experiments
+Run experiments individually with
 
 ```bash
 python legendre.py
@@ -40,69 +44,55 @@ python periodic_mixed.py
 python paley_wiener.py
 ```
 
-| driver | output |
-|---|---|
-| `legendre.py` | `figures/legendre.png`, `figures/legendre_points.png` |
-| `matern.py` | `figures/matern.png`, `figures/matern_points.png` |
-| `periodic_mixed.py` | `figures/periodic_mixed.png`, `figures/periodic_mixed_points.png` |
-| `paley_wiener.py` | `figures/paley_wiener.png`, `figures/paley_wiener_points.png` |
+Each driver writes its comparison and point-design figures under `figures/`:
 
-The Matérn experiment is supplemental. Legendre and Matérn use `[-1,1]^d`, the
-periodic experiment uses `[0,1]^d`, and Paley–Wiener uses `[-1,1]`.
-Both Legendre figures use Mercer truncation `M=24,000` and a 20,000-point
-Chebyshev candidate grid.
+| Driver | Comparison | Point design |
+| --- | --- | --- |
+| `legendre.py` | `legendre.png` | `legendre_points.png` |
+| `matern.py` | `matern.png` | `matern_points.png` |
+| `periodic_mixed.py` | `periodic_mixed.png` | `periodic_mixed_points.png` |
+| `paley_wiener.py` | `paley_wiener.png` | `paley_wiener_points.png` |
 
-## Publication run
+The ignored `figures/` directory contains generated output, not source files.
 
-Run the manuscript figures sequentially in the foreground:
+
+The sequential runner writes figures, numerical `*_data.npz` files, and an
+atomic `status.json` manifest below the requested output directory:
 
 ```bash
 python run_manuscript_figures.py --output-dir runs/manuscript
-```
-
-The runner writes PNGs to `<output-dir>/figures/` and keeps numerical arrays,
-`run.log`, and `status.json` in the output directory. Resume completed or interrupted stages with:
-
-```bash
 python run_manuscript_figures.py --output-dir runs/manuscript --resume
+python run_manuscript_figures.py --output-dir runs/manuscript --dry-run
 ```
 
-External schedulers or process managers can wrap this command when background execution
-is needed.
+`--resume` skips stages that are both recorded as complete and still have their
+figure on disk. `--dry-run` prints the stage plan without creating output.
 
-## Implementation
+## What is computed
 
-- `kernels.py`: kernel definitions, grids, feature maps, gradients, and available
-  modulus or spectral-tail helpers.
-- `greedy.py`: device-agnostic incremental P-greedy algorithm.
-- `widths.py`: grid construction, Gelfand-width minimax, certification, exchange, and
-  the shared sampling-vs-width driver.
-- `run_manuscript_figures.py`: resumable publication workflow.
+Every lower curve is a covariance-eigenvalue tail for a probability measure on
+the domain:
 
-P-greedy uses an incremental Newton-basis power update. Candidate grids are
-kernel-specific: Chebyshev for the boundary-concentrated Legendre kernel and uniform
-Sobol grids for stationary kernels.
+- Legendre uses normalized Lebesgue measure and the exact infinite Mercer tail.
+  For the maintained cases `s=2,3`, P-greedy evaluates the infinite kernel by a
+  partial-fraction Green-kernel formula and caches only a few complex Legendre
+  functions on the candidate grid; there is no feature truncation.
+  In the `s=3` panel, the full blue curve is retained, but its large-`m`
+  flattening is a float64 cancellation floor and is not interpreted as an
+  asymptotic feature.
+- Matérn uses Gauss-Legendre quadrature in one dimension and an equal-weight
+  Sobol discrete measure in three dimensions.
+- Periodic mixed Sobolev uses the complex Fourier covariance tail, which is a lower
+  bound for the real-space width and agrees at complete sine/cosine shells.
+- Paley-Wiener uses the covariance-eigenvalue tail of a Gauss-Legendre
+  probability measure on $[-1,1]$. Each finite discrete tail is an
+  exact-arithmetic lower bound and converges to the normalized Slepian tail as
+  the quadrature is refined.
 
-The Gelfand-width computation uses reweighted SVD with optional Remez exchange.
-`compress_irls=True`, the driver default, retains `min(N, 3n+100)` dominant
-coordinates. Set `compress_irls=False` to use the full coordinates employed by the
-manuscript algorithm:
+The lower-bound constructions are rigorous in exact arithmetic; the plotted
+float64 eigensolver results are not interval certificates. A conservative
+eigenvalue shift and a shared display floor keep unresolved tail values out of
+the interpretation.
 
-```python
-import legendre
-legendre.comparison_figure(compress_irls=False)
-```
-
-Certified upper values use a branch-and-bound residual supremum when the kernel
-provides a rigorous cell modulus. Legendre uses a numerical supremum estimate, as do
-periodic kernels in dimension greater than one. The periodic spectral tail is exact at
-closed Fourier shells and provides an independent reference.
-
-## Numerical caveats
-
-- Keep Gelfand-width computations in float64. The incremental power update also uses
-  float64 except for the audited `H^1_mix` sampling curve in `periodic_mixed.py`.
-- Values near the float64 cancellation floor are numerical floors, not resolved
-  widths. This is most visible past the Paley–Wiener effective dimension.
-- `refine=False` returns a grid-maximum estimate without certification or exchange.
-- Check `cn_certified` before treating a plotted upper edge as a proof.
+The implementation is concentrated in `greedy.py`, `kernels.py`,
+`lower_bounds.py`, and the small experiment drivers.

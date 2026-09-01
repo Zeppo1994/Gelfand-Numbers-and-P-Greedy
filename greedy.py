@@ -1,20 +1,15 @@
-"""
-P-greedy center selection for kernel interpolation.
+"""Strong P-greedy center selection on a finite candidate grid.
 
-The next center is placed where the power function
-    Pow_P(x) = dist_H( K(.,x), span{ K(.,x_i) : x_i in P } )
-is maximal over a fixed candidate grid.  This is the strong rule (gamma=1) relative to that
-finite grid.  It satisfies the weak-greedy rule with gamma=1/2 on the full dictionary of kernel
-translates only if the grid resolves the true power-function supremum within a factor of two;
-the computation does not verify that off-grid condition.  PGreedy maintains the residual
-power at EVERY grid point via an incremental Newton basis (Pazouki-Schaback): O(N)/step,
-O(N m^2) total, returning the full numerical sampling-number curve g_m^lin over m centers.  Device-
-agnostic (allocates on the input's device) and dtype-threaded (default float64; float32
-is faster on GPU but its power update p <- p - v_n^2 cancels badly as Pow -> 0).
+The implementation maintains the squared power function at every grid point
+through an incremental Newton basis. Each step maximizes that grid residual
+exactly, but no off-grid accuracy guarantee is inferred. The returned curve is
+therefore a numerical sampling-error estimate, not the optimized sampling number.
 """
 
 from __future__ import annotations
+
 import torch
+
 
 class PGreedy:
     """Strong P-greedy: exact argmax of the residual power over the grid."""
@@ -37,22 +32,24 @@ class PGreedy:
         """Run strong greedy over the fixed candidate grid Xd."""
         Xd = Xd.reshape(Xd.shape[0], -1).to(self.dtype)  # (N, d)
         dev = Xd.device
-        N, d = Xd.shape
-        m = min(self.max_iter, N)
+        point_count, dimension = Xd.shape
+        capacity = min(self.max_iter, point_count)
 
         self.kernel.prepare(Xd)  # cache grid features ONCE
         p = self.kernel.diag_grid().clone()  # running power^2 over grid, init K(x,x)
 
-        V = torch.zeros((N, m), dtype=self.dtype, device=dev)  # Newton basis on grid
-        idx_sel = torch.zeros(m, dtype=torch.long, device=dev)
-        ctrs = torch.zeros((m, d), dtype=self.dtype, device=dev)
-        pmax = torch.zeros(m + 1, dtype=self.dtype, device=dev)
+        V = torch.zeros(
+            (point_count, capacity), dtype=self.dtype, device=dev
+        )  # Newton basis on grid
+        idx_sel = torch.zeros(capacity, dtype=torch.long, device=dev)
+        ctrs = torch.zeros((capacity, dimension), dtype=self.dtype, device=dev)
+        pmax = torch.zeros(capacity + 1, dtype=self.dtype, device=dev)
         pmax[0] = torch.sqrt(torch.clamp(p.max(), min=0))  # pmax[0] = R (0 centers)
         n_used = 0
 
-        for n in range(m):
+        for n in range(capacity):
             # strong greedy: exact argmax of the residual power over the grid.
-            j = torch.argmax(p)
+            j = int(torch.argmax(p))
             pj = p[j]
             # stop on exhausted residual power (pj<=0 would divide by sqrt(0))
             # or once the tolerance is reached.
@@ -60,7 +57,7 @@ class PGreedy:
                 break
             idx_sel[n] = j
             ctrs[n] = Xd[j]
-            sqrt_pj = pj**0.5
+            sqrt_pj = torch.sqrt(pj)
 
             # new kernel column against the freshly selected center (from cache)
             a_new = self.kernel.col(j)  # (N,), cheap matvec
@@ -88,22 +85,26 @@ class PGreedy:
         return self
 
     def g_curve(self) -> torch.Tensor:
-        """Numerical sampling numbers g_m^lin as a function of the number of centers m.
+        """Return the grid power maximum after each number of selected centers.
 
-        Returns tensor of length n_+1; entry m is the value with m centers."""
+        The tensor has length ``n_ + 1``; entry ``m`` uses ``m`` centers.
+        """
         return self.pmax_
 
 
-def power_function(kernel, P: torch.Tensor, Xq: torch.Tensor) -> torch.Tensor:
-    """Pow_P(x) = sqrt( K(x,x) - K(x,P) Kpp^-1 K(P,x) ) at every x in Xq, direct from centers P
-    (PGreedy tracks only the running sup; this recomputes the whole power function for plots).
-    """
-    dt = kernel.dtype
-    Kpp = kernel.eval(P, P) + 1e-12 * torch.eye(
-        P.shape[0], dtype=dt, device=P.device
-    )  # jitter for a stable solve
-    Kqp = kernel.eval(Xq, P)
-    sol = torch.linalg.solve(Kpp, Kqp.T)
-    return torch.sqrt(
-        torch.clamp(kernel.diagonal(Xq) - torch.sum(Kqp * sol.T, dim=1), min=0.0)
+def power_function(
+    kernel,
+    centers: torch.Tensor,
+    query: torch.Tensor,
+    *,
+    jitter: float = 1e-12,
+) -> torch.Tensor:
+    """Evaluate the power function directly from a fixed center set."""
+    gram = kernel.eval(centers, centers)
+    gram = gram + jitter * torch.eye(
+        centers.shape[0], dtype=kernel.dtype, device=centers.device
     )
+    cross = kernel.eval(query, centers)
+    coefficients = torch.linalg.solve(gram, cross.T)
+    residual = kernel.diagonal(query) - torch.sum(cross * coefficients.T, dim=1)
+    return torch.sqrt(torch.clamp(residual, min=0.0))
