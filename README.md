@@ -10,9 +10,10 @@ For the same measurement budget $n$, the exact continuum quantities satisfy
 \]
 
 where $P(X_n)$ is the worst-case power-function error of the selected point set.
-The plots use its maximum on a finite candidate grid, denoted implicitly by the
-P-greedy curve. That grid maximum is a numerical surrogate for $P(X_n)$, not a
-certified continuum upper bound or a solution of the global point-set problem.
+The P-greedy curve in the plots is the maximum of the power function on a
+finite candidate grid. That grid maximum is a numerical surrogate for $P(X_n)$,
+not a certified continuum upper bound or a solution of the global point-set
+problem.
 
 The four experiments are:
 
@@ -49,23 +50,17 @@ Each driver writes its comparison and point-design figures under `figures/`:
 
 The ignored `figures/` directory contains generated output, not source files.
 
-The untracked `legacy/` directory holds the sequential manuscript runner
-(`legacy/run_manuscript_figures.py`, with `--resume` and `--dry-run`) and the
-test suite (`python -m pytest -q legacy/tests`), both run from the repository
-root against the live modules, alongside superseded code.
-
 ## What is computed
 
 Every lower curve is a covariance-eigenvalue tail for a probability measure on
 the domain:
 
 - Legendre uses normalized Lebesgue measure and the exact infinite Mercer tail.
-  For the maintained cases `s=2,3`, P-greedy evaluates the infinite kernel by a
-  partial-fraction Green-kernel formula and caches only a few complex Legendre
-  functions on the candidate grid; there is no feature truncation.
-  In the `s=3` panel, the full blue curve is retained, but its large-`m`
-  flattening is a float64 cancellation floor and is not interpreted as an
-  asymptotic feature.
+  P-greedy evaluates the infinite kernel for integer `s` by a partial-fraction
+  Green-kernel formula built from a few complex Legendre functions on the
+  candidate grid; there is no feature truncation. The large-`m` flattening of
+  the `s=3` P-greedy curve is a float64 cancellation floor, not an asymptotic
+  feature.
 - Matérn uses Gauss-Legendre quadrature in one dimension and an equal-weight
   Sobol discrete measure in three dimensions.
 - Periodic mixed Sobolev uses the complex Fourier covariance tail, which is a lower
@@ -77,8 +72,8 @@ the domain:
 
 The lower-bound constructions are rigorous in exact arithmetic; the plotted
 float64 eigensolver results are not interval certificates. A conservative
-eigenvalue shift and a shared display floor keep unresolved tail values out of
-the interpretation.
+eigenvalue shift and per-experiment resolution floors keep unresolved values
+out of the interpretation.
 
 The implementation is concentrated in `greedy.py`, `kernels.py`,
 `lower_bounds.py`, and the small experiment drivers.
