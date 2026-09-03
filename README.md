@@ -23,17 +23,11 @@ The four experiments are:
 
 ## Run
 
-Python 3.10 or newer is required. Create the reproducible Conda environment and
-run the tests with
+Python 3.10 or newer is required. Install the runtime dependencies with
 
 ```bash
-conda env create -f environment.yml
-conda activate sampling-numbers
-python -m pytest -q
+python -m pip install -r requirements.txt
 ```
-
-Alternatively, install the same runtime dependencies with
-`python -m pip install -r requirements.txt`.
 
 Run experiments individually with
 
@@ -55,18 +49,10 @@ Each driver writes its comparison and point-design figures under `figures/`:
 
 The ignored `figures/` directory contains generated output, not source files.
 
-
-The sequential runner writes figures, numerical `*_data.npz` files, and an
-atomic `status.json` manifest below the requested output directory:
-
-```bash
-python run_manuscript_figures.py --output-dir runs/manuscript
-python run_manuscript_figures.py --output-dir runs/manuscript --resume
-python run_manuscript_figures.py --output-dir runs/manuscript --dry-run
-```
-
-`--resume` skips stages that are both recorded as complete and still have their
-figure on disk. `--dry-run` prints the stage plan without creating output.
+The untracked `legacy/` directory holds the sequential manuscript runner
+(`legacy/run_manuscript_figures.py`, with `--resume` and `--dry-run`) and the
+test suite (`python -m pytest -q legacy/tests`), both run from the repository
+root against the live modules, alongside superseded code.
 
 ## What is computed
 

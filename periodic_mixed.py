@@ -52,32 +52,28 @@ def comparison_figure(
         print(f"\n=== d={d} ===  (greedy grid {selection_grid}, dev={DEVICE})")
         for smoothness, requested_nodes in node_counts.items():
             dtype = torch.float32 if smoothness == 1 else torch.float64
-            sampling_kernel = PeriodicSobolevMixedKernel(
+            kernel = PeriodicSobolevMixedKernel(
                 m=smoothness,
                 d=d,
                 dtype=dtype,
                 device=DEVICE,
             )
             greedy = bounds.fit_p_greedy(
-                sampling_kernel,
+                kernel,
                 d=d,
                 max_iter=requested_nodes,
                 sel_grid=selection_grid,
+                device=DEVICE,
             )
             sampling = greedy.g_curve().cpu().double().numpy()
             n_used = greedy.n_
             indices = np.arange(len(sampling))
-            reliable_sampling = sampling > POWER_FLOOR
-            reliable_end = (
-                int(indices[reliable_sampling][-1])
-                if reliable_sampling.any()
-                else n_used - 1
-            )
+            reliable = np.flatnonzero(sampling > POWER_FLOOR)
+            reliable_end = int(reliable[-1]) if reliable.size else n_used - 1
             fit_indices = bounds.log_spaced_ints(
                 min(n_cap, n_used - 1, reliable_end), 14
             )
 
-            kernel = PeriodicSobolevMixedKernel(m=smoothness, d=d)
             lower_tails = kernel.gelfand_lower_tails(n_used)
             lower = np.sqrt(np.clip(lower_tails, 0.0, None))
             lower_at_fit = lower[fit_indices]
@@ -141,14 +137,13 @@ def comparison_figure(
             combined[f"{tag}_lower"] = lower
             combined[f"{tag}_n_used"] = n_used
 
-        axis.set_xlabel(r"$n$ (points / width index)")
-        axis.set_ylabel(r"$\|\cdot\|_\infty$ width")
-        axis.set_title(
+        bounds.finish_comparison_axis(
+            axis,
             rf"$H^m_{{\mathrm{{mix}}}}([0,1]^{d})$: "
-            "sampling estimates and lower bounds"
+            "sampling estimates and lower bounds",
+            xlabel=r"$n$ (points / width index)",
+            legend_fontsize=7.2,
         )
-        axis.legend(fontsize=7.2)
-        axis.grid(True, which="both", alpha=0.3)
 
     output = bounds.finalize_figure(fig, out)
     print(f"figure saved -> {output}")
@@ -178,6 +173,7 @@ def points_figure(
         d=2,
         max_iter=int(counts.max()),
         sel_grid=sel_grid,
+        device=DEVICE,
     )
     if greedy.n_ < counts.max():
         raise RuntimeError(

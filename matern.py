@@ -57,11 +57,7 @@ def comparison_figure(
     for axis, (d, result) in zip(axes[0], results):
         bounds.plot_sampling_estimate(axis, result["sampling_n"], result["sampling"])
         bounds.plot_gelfand_lower_bound(axis, result["lower_n"], result["lower"])
-        axis.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
-        axis.set_ylabel(r"$\|\cdot\|_\infty$ width")
-        axis.set_title(rf"Matérn $\nu=3/2$, $d={d}$")
-        axis.legend(fontsize=8)
-        axis.grid(True, which="both", alpha=0.3)
+        bounds.finish_comparison_axis(axis, rf"Matérn $\nu=3/2$, $d={d}$")
 
     output = bounds.finalize_figure(fig, out)
     print(f"figure saved -> {output}")

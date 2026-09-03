@@ -71,8 +71,7 @@ def _complex_legendre_p(eigenvalue: complex, points: np.ndarray) -> np.ndarray:
         lambda x, state: np.array(
             [
                 state[1],
-                (2.0 * x * state[1] - eigenvalue * state[0])
-                / (1.0 - x * x),
+                (2.0 * x * state[1] - eigenvalue * state[0]) / (1.0 - x * x),
             ]
         ),
         (start, descending[-1]),
@@ -117,30 +116,23 @@ class LegendreMercerKernel:
             * (2.0 * np.arange(self.order, dtype=np.float64) + 1.0)
             / self.order
         )
-        partial_fractions = 1.0 / (
-            self.order * roots ** (self.order - 1)
-        )
+        partial_fractions = 1.0 / (self.order * roots ** (self.order - 1))
         degrees = 0.5 * (-1.0 + np.sqrt(1.0 + 4.0 * roots))
         self._roots = roots
         self._resolvent_coefficients_np = (
-            -np.pi
-            * partial_fractions
-            / (2.0 * np.sin(np.pi * degrees))
+            -np.pi * partial_fractions / (2.0 * np.sin(np.pi * degrees))
         )
         self._endpoint_diagonal = float(
             np.real(
                 -0.5
                 * np.sum(
-                    partial_fractions
-                    * (digamma(-degrees) + digamma(degrees + 1.0))
+                    partial_fractions * (digamma(-degrees) + digamma(degrees + 1.0))
                 )
             )
         )
 
     def _resolvent_basis(self, points: np.ndarray):
-        plus = np.stack(
-            [_complex_legendre_p(root, points) for root in self._roots]
-        )
+        plus = np.stack([_complex_legendre_p(root, points) for root in self._roots])
         if np.allclose(points, -points[::-1], rtol=0.0, atol=2e-14):
             minus = plus[:, ::-1].copy()
         else:
@@ -168,10 +160,7 @@ class LegendreMercerKernel:
                 mx[:, None] * py[None, :],
                 px[:, None] * my[None, :],
             )
-        endpoint_pairs = (
-            (x[:, None] == y[None, :])
-            & (np.abs(x[:, None]) == 1.0)
-        )
+        endpoint_pairs = (x[:, None] == y[None, :]) & (np.abs(x[:, None]) == 1.0)
         matrix[endpoint_pairs] = self._endpoint_diagonal
         return torch.as_tensor(
             np.real(matrix),
@@ -199,9 +188,7 @@ class LegendreMercerKernel:
         self._Xd = Xd.reshape(-1, 1)
         points = self._Xd[:, 0].detach().cpu().numpy()
         if np.any(np.diff(points) < 0.0):
-            raise ValueError(
-                "the low-memory Legendre path requires a sorted grid"
-            )
+            raise ValueError("the low-memory Legendre path requires a sorted grid")
         plus, minus = self._resolvent_basis(points)
         device = self._Xd.device
         self._resolvent_coefficients = torch.as_tensor(
@@ -220,9 +207,7 @@ class LegendreMercerKernel:
             device=device,
         )
         diagonal = torch.sum(
-            self._resolvent_coefficients[:, None]
-            * self._p_plus
-            * self._p_minus,
+            self._resolvent_coefficients[:, None] * self._p_plus * self._p_minus,
             dim=0,
         ).real
         endpoint_mask = torch.abs(self._Xd[:, 0]) == 1.0
@@ -234,24 +219,11 @@ class LegendreMercerKernel:
 
     def col(self, j: int) -> torch.Tensor:
         j = int(j)
-        column = torch.empty(
-            self._Xd.shape[0],
-            dtype=self.dtype,
-            device=self._Xd.device,
-        )
-        column[: j + 1] = torch.sum(
-            self._resolvent_coefficients[:, None]
-            * self._p_minus[:, : j + 1]
-            * self._p_plus[:, j, None],
-            dim=0,
-        ).real.to(self.dtype)
-        if j + 1 < self._Xd.shape[0]:
-            column[j + 1 :] = torch.sum(
-                self._resolvent_coefficients[:, None]
-                * self._p_minus[:, j, None]
-                * self._p_plus[:, j + 1 :],
-                dim=0,
-            ).real.to(self.dtype)
+        weighted_minus = self._resolvent_coefficients[:, None] * self._p_minus
+        lower = torch.sum(weighted_minus * self._p_plus[:, j, None], dim=0)
+        upper = torch.sum(weighted_minus[:, j, None] * self._p_plus, dim=0)
+        below = torch.arange(self._Xd.shape[0], device=self._Xd.device) <= j
+        column = torch.where(below, lower, upper).real.to(self.dtype)
         column[j] = self._diag[j]
         return column
 
@@ -262,19 +234,14 @@ class LegendreMercerKernel:
             raise ValueError("n_max must be nonnegative")
         cutoff = max(200_000, 200 * (n_max + 1))
         degrees = np.arange(cutoff, dtype=np.float64)
-        eigenvalues = 1.0 / (
-            1.0 + (degrees * (degrees + 1.0)) ** self.order
-        )
-        partial_tails = 0.5 * np.cumsum(
-            eigenvalues[::-1], dtype=np.float64
-        )[::-1]
-        allowance = (
-            32.0 * cutoff * np.finfo(np.float64).eps * partial_tails
-        )
+        eigenvalues = 1.0 / (1.0 + (degrees * (degrees + 1.0)) ** self.order)
+        partial_tails = 0.5 * np.cumsum(eigenvalues[::-1], dtype=np.float64)[::-1]
+        allowance = 32.0 * cutoff * np.finfo(np.float64).eps * partial_tails
         return np.maximum(
             partial_tails[: n_max + 1] - allowance[: n_max + 1],
             0.0,
         )
+
 
 class MaternKernel:
     """Half-integer Matérn kernel on [-1,1]^d."""
@@ -385,8 +352,7 @@ class PeriodicSobolevMixedKernel:
         degree = 2 * self.m
         numbers = bernoulli(degree)
         coefficients = [
-            float(comb(degree, j, exact=True) * numbers[j])
-            for j in range(degree + 1)
+            float(comb(degree, j, exact=True) * numbers[j]) for j in range(degree + 1)
         ]
         self.coeffs = torch.tensor(coefficients, dtype=dtype, device=device)
         self.pref = float((-1.0) ** (self.m - 1) / factorial(degree))
@@ -419,8 +385,7 @@ class PeriodicSobolevMixedKernel:
         n_max = int(n_max)
         distinct_count = n_max + 2
         values = [1.0] + [
-            (2.0 * math.pi * k) ** (-2 * self.m)
-            for k in range(1, distinct_count)
+            (2.0 * math.pi * k) ** (-2 * self.m) for k in range(1, distinct_count)
         ]
         multiplicities = [1] + [2] * (distinct_count - 1)
         heap = [(-1.0, (0,) * self.d)]
@@ -495,13 +460,9 @@ class PaleyWienerSincKernel:
 
     def diagonal(self, X: torch.Tensor) -> torch.Tensor:
         count = X.reshape(-1, 1).shape[0]
-        return torch.full(
-            (count,), self.diag_val, dtype=self.dtype, device=X.device
-        )
+        return torch.full((count,), self.diag_val, dtype=self.dtype, device=X.device)
 
-    def gelfand_lower_tails(
-        self, n_max: int, n_quad: int | None = None
-    ) -> np.ndarray:
+    def gelfand_lower_tails(self, n_max: int, n_quad: int | None = None) -> np.ndarray:
         """Return safely adjusted squared Gauss-Legendre covariance tails."""
         n_max = int(n_max)
         if n_quad is None:

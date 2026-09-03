@@ -46,9 +46,20 @@ def box_grid(
     return lo + (hi - lo) * unit_grid
 
 
-def fit_p_greedy(kernel, *, d: int = 1, max_iter: int, sel_grid: int) -> PGreedy:
-    """Fit P-greedy using the kernel's domain and candidate-grid convention."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def fit_p_greedy(
+    kernel,
+    *,
+    d: int = 1,
+    max_iter: int,
+    sel_grid: int,
+    device: str | None = None,
+) -> PGreedy:
+    """Fit P-greedy using the kernel's domain and candidate-grid convention.
+
+    ``device`` defaults to CUDA when available.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     grid = box_grid(
         sel_grid,
         d,
@@ -131,6 +142,45 @@ def plot_gelfand_lower_bound(
     return ax.loglog(n, lower, "-", color=color, lw=1.5, label=label)[0]
 
 
+def finish_comparison_axis(
+    axis,
+    title,
+    *,
+    xlabel=r"$m$ (points) $/$ $n$ (width)",
+    legend_fontsize=8,
+    legend_loc=None,
+):
+    """Apply the shared labels, legend, and grid of a comparison panel."""
+    axis.set_xlabel(xlabel)
+    axis.set_ylabel(r"$\|\cdot\|_\infty$ width")
+    axis.set_title(title)
+    axis.legend(fontsize=legend_fontsize, loc=legend_loc)
+    axis.grid(True, which="both", alpha=0.3)
+
+
+def plot_selection_order(axis, centers, m, *, label):
+    """Scatter one-dimensional centers by selection step, marking the first m."""
+    order = np.arange(1, len(centers) + 1)
+    axis.scatter(centers, order, c=order, cmap="viridis", s=16, zorder=2)
+    axis.axhline(m, color="C3", lw=1.2, ls="--", zorder=3)
+    axis.plot(
+        centers[:m],
+        np.full(m, m),
+        "|",
+        color="C3",
+        ms=9,
+        mew=1.4,
+        label=label,
+        zorder=4,
+    )
+    axis.set_xlabel(r"center location $x_i$")
+    axis.set_ylabel("selection step")
+    axis.set_xlim(-1.03, 1.03)
+    axis.set_ylim(0, 1.03 * len(centers))
+    axis.legend(fontsize=8, loc="lower right")
+    axis.grid(True, alpha=0.3)
+
+
 def sampling_vs_lower_bound(
     kernel,
     *,
@@ -144,7 +194,9 @@ def sampling_vs_lower_bound(
 
     The sampling curve is a finite-grid numerical surrogate. The lower curve
     comes from the kernel's gelfand_lower_tails method and is independent
-    of the greedy design.
+    of the greedy design. ``sampling_curve`` holds the full grid-maximum
+    power at every center count, ``sampling`` a log-spaced subsample of it
+    for plotting, and ``sampling_at_lower_n`` its exact values at ``lower_n``.
     """
     greedy = fit_p_greedy(kernel, d=d, max_iter=m_max, sel_grid=sel_grid)
     n_used = greedy.n_
@@ -152,7 +204,7 @@ def sampling_vs_lower_bound(
         raise RuntimeError("P-greedy stopped before producing a comparison curve")
 
     # Exclude the final update, which can be exactly zero on an exhausted grid.
-    g_curve = greedy.g_curve().cpu().numpy()
+    g_curve = greedy.g_curve().cpu().double().numpy()[:n_used]
     sampling_n = log_spaced_ints(n_used - 1, 60)
     sampling = g_curve[sampling_n]
 
@@ -165,9 +217,7 @@ def sampling_vs_lower_bound(
         raise ValueError("gelfand_lower_tails must return values for n=0,...,n_cap")
     lower_n = np.arange(1, cap + 1)
     lower = np.sqrt(np.clip(tails[lower_n], 0.0, None))
-    sampling_at_lower_n = np.exp(
-        np.interp(np.log(lower_n), np.log(sampling_n), np.log(sampling))
-    )
+    sampling_at_lower_n = g_curve[lower_n]
     ratio = np.divide(
         sampling_at_lower_n,
         lower,
@@ -175,6 +225,7 @@ def sampling_vs_lower_bound(
         where=lower > 0.0,
     )
     return {
+        "sampling_curve": g_curve,
         "sampling_n": sampling_n,
         "sampling": sampling,
         "lower_n": lower_n,

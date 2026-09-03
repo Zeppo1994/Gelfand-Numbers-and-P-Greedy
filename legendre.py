@@ -46,11 +46,7 @@ def _comparison_panel(
         lw=1.0,
         label=rf"$\propto n^{{-{s - 0.5:g}}}$",
     )
-    ax.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
-    ax.set_ylabel(r"$\|\cdot\|_\infty$ width")
-    ax.set_title(rf"Legendre RKHS, $s={s:g}$")
-    ax.legend(fontsize=8)
-    ax.grid(True, which="both", alpha=0.3)
+    bounds.finish_comparison_axis(ax, rf"Legendre RKHS, $s={s:g}$")
     return result
 
 
@@ -131,27 +127,8 @@ def points_figure(
             )
 
         centers = greedy.ctrs_.reshape(-1).cpu().numpy()
-        design = centers[:m]
-        order = np.arange(1, len(centers) + 1)
-        axis.scatter(centers, order, c=order, cmap="viridis", s=16, zorder=2)
-        axis.axhline(m, color="C3", lw=1.2, ls="--", zorder=3)
-        axis.plot(
-            design,
-            np.full(m, m),
-            "|",
-            color="C3",
-            ms=9,
-            mew=1.4,
-            label=rf"first $m={m}$ centers",
-            zorder=4,
-        )
-        axis.set_xlabel(r"center location $x_i$")
-        axis.set_ylabel("selection step")
+        bounds.plot_selection_order(axis, centers, m, label=rf"first $m={m}$ centers")
         axis.set_title(rf"Legendre kernel: $s={smoothness:g}$, $m={m}$")
-        axis.set_xlim(-1.03, 1.03)
-        axis.set_ylim(0, 1.03 * len(centers))
-        axis.legend(fontsize=8, loc="lower right")
-        axis.grid(True, alpha=0.3)
 
         tag = f"s{smoothness:g}".replace(".", "p")
         designs[f"{tag}_centers"] = centers

@@ -30,12 +30,9 @@ def comparison_figure(
         result = bounds.sampling_vs_lower_bound(kernel, **config)
         result["n_eff"] = kernel.n_eff
         result["diag"] = kernel.diag_val
-        threshold = (
-            20.0 * np.sqrt(np.finfo(np.float64).eps) * np.sqrt(result["diag"])
-        )
-        reliable = (
-            (result["sampling_at_lower_n"] > threshold)
-            & (result["lower"] > threshold)
+        threshold = 20.0 * np.sqrt(np.finfo(np.float64).eps) * np.sqrt(result["diag"])
+        reliable = (result["sampling_at_lower_n"] > threshold) & (
+            result["lower"] > threshold
         )
         result["reliable"] = reliable
         result["threshold"] = threshold
@@ -73,9 +70,7 @@ def comparison_figure(
             fontsize=8,
             color="0.35",
         )
-        axis.axhspan(
-            panel_floor, result["threshold"], color="0.85", alpha=0.6, lw=0
-        )
+        axis.axhspan(panel_floor, result["threshold"], color="0.85", alpha=0.6, lw=0)
         axis.text(
             0.97,
             0.03,
@@ -87,15 +82,14 @@ def comparison_figure(
             va="bottom",
         )
         axis.set_ylim(panel_floor, 8.0)
-        axis.set_xlabel(r"$m$ (points) $/$ $n$ (width)")
-        axis.set_ylabel(r"$\|\cdot\|_\infty$ width")
         c_value = n_eff * np.pi / 2
-        axis.set_title(
+        bounds.finish_comparison_axis(
+            axis,
             rf"Paley-Wiener $K_c$, $c={c_value:.1f}$"
-            rf"  ($N_{{\mathrm{{eff}}}}={n_eff}$)"
+            rf"  ($N_{{\mathrm{{eff}}}}={n_eff}$)",
+            legend_fontsize=7.5,
+            legend_loc="lower left",
         )
-        axis.legend(fontsize=7.5, loc="lower left")
-        axis.grid(True, which="both", alpha=0.3)
 
     output = bounds.finalize_figure(fig, out)
     print(f"figure saved -> {output}")
@@ -121,46 +115,32 @@ def points_figure(
     )
     designs = {}
     for axis, n_eff in zip(axes[0], n_effs):
-        target = n_eff
         kernel = PaleyWienerSincKernel(n_eff=n_eff)
         greedy = bounds.fit_p_greedy(
             kernel,
-            max_iter=int(np.ceil(1.2 * target)),
+            max_iter=int(np.ceil(1.2 * n_eff)),
             sel_grid=grid,
         )
-        if greedy.n_ < target:
+        if greedy.n_ < n_eff:
             plt.close(fig)
             raise RuntimeError(
-                f"P-greedy stopped at {greedy.n_} centers before n={target}"
+                f"P-greedy stopped at {greedy.n_} centers before n={n_eff}"
             )
 
         centers = greedy.ctrs_.reshape(-1).cpu().numpy()
-        design = np.sort(centers[:target])
-        ideal = -1.0 + (2.0 * np.arange(target) + 1.0) / target
-        order = np.arange(1, len(centers) + 1)
-        axis.scatter(centers, order, c=order, cmap="viridis", s=16, zorder=2)
-        axis.axhline(target, color="C3", lw=1.2, ls="--", zorder=3)
-        axis.plot(
-            centers[:target],
-            np.full(target, target),
-            "|",
-            color="C3",
-            ms=9,
-            mew=1.4,
-            label=rf"first $N_{{\mathrm{{eff}}}}={target}$ centers",
-            zorder=4,
+        design = np.sort(centers[:n_eff])
+        ideal = -1.0 + (2.0 * np.arange(n_eff) + 1.0) / n_eff
+        bounds.plot_selection_order(
+            axis,
+            centers,
+            n_eff,
+            label=rf"first $N_{{\mathrm{{eff}}}}={n_eff}$ centers",
         )
-        axis.set_xlabel(r"center location $x_i$")
-        axis.set_ylabel("selection step")
         axis.set_title(rf"$N_{{\mathrm{{eff}}}}={n_eff}$")
-        axis.set_xlim(-1.03, 1.03)
-        axis.set_ylim(0, 1.03 * len(centers))
-        axis.legend(fontsize=8, loc="lower right")
-        axis.grid(True, alpha=0.3)
 
         tag = f"ne{n_eff}"
         designs[f"{tag}_centers"] = centers
-        designs[f"{tag}_target"] = target
+        designs[f"{tag}_target"] = n_eff
         designs[f"{tag}_max_uniform_deviation"] = np.max(np.abs(design - ideal))
         designs[f"{tag}_n_used"] = greedy.n_
 
